@@ -38,10 +38,19 @@ export default function LoginPage() {
     const { error } = await signIn(data.email, data.password)
 
     if (error) {
-      // Generic message — do not reveal whether email or password is wrong
-      setError('root', {
-        message: 'Invalid email or password. Please try again.',
-      })
+      // Show a specific message for the email-not-confirmed case
+      const msg = error.message.toLowerCase()
+      if (msg.includes('email not confirmed') || msg.includes('not confirmed')) {
+        setError('root', {
+          message:
+            'Please verify your email before signing in. Check your inbox for the verification link, or use "Forgot password?" to request a new one.',
+        })
+      } else {
+        // Generic message for wrong credentials — do not reveal which field is wrong
+        setError('root', {
+          message: 'Invalid email or password. Please try again.',
+        })
+      }
       return
     }
 

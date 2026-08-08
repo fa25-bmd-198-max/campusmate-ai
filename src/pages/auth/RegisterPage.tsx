@@ -1,5 +1,5 @@
 ﻿import { useState } from 'react'
-import { Link, Navigate } from 'react-router-dom'
+import { Link, Navigate, useNavigate } from 'react-router-dom'
 import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { z } from 'zod'
@@ -30,6 +30,7 @@ type FormData = z.infer<typeof schema>
 
 export default function RegisterPage() {
   const { signUp, isAuthenticated } = useAuth()
+  const navigate                     = useNavigate()
   const [showPassword,  setShowPassword]  = useState(false)
   const [showConfirm,   setShowConfirm]   = useState(false)
   const [submitted,     setSubmitted]     = useState(false)
@@ -74,7 +75,7 @@ export default function RegisterPage() {
 
   // ── Form ──────────────────────────────────────────────────
   const onSubmit = async (data: FormData) => {
-    const { error } = await signUp({
+    const { error, session } = await signUp({
       email:     data.email,
       password:  data.password,
       full_name: data.full_name,
@@ -89,6 +90,14 @@ export default function RegisterPage() {
       return
     }
 
+    // If Supabase returned a session immediately (email confirmation disabled),
+    // navigate straight to the app — no need to check the inbox.
+    if (session) {
+      navigate('/dashboard', { replace: true })
+      return
+    }
+
+    // Email confirmation is enabled — ask the user to check their inbox.
     setSubmittedEmail(data.email)
     setSubmitted(true)
   }
