@@ -1,4 +1,12 @@
-import { GoogleGenerativeAI } from '@google/generative-ai'
+// ============================================================
+// AI Service — powered by Groq (free, no billing required)
+// Model: llama-3.3-70b-versatile (fast, high-quality, free tier)
+//
+// All exported function signatures are identical to the previous
+// Gemini implementation — no other files need to change.
+// ============================================================
+
+import Groq from 'groq-sdk'
 import { z } from 'zod'
 import type {
   SummaryResult,
@@ -9,21 +17,25 @@ import type {
   AssignmentBreakdown,
 } from '@/types/ai.types'
 
+// ── Model to use ──────────────────────────────────────────────
+// llama-3.3-70b-versatile: best quality on Groq free tier
+// Fallback: llama3-8b-8192 (faster, smaller)
+const GROQ_MODEL = 'llama-3.3-70b-versatile'
+
 // ── Client initialization ─────────────────────────────────────
 
-const apiKey = import.meta.env.VITE_GEMINI_API_KEY as string | undefined
+const apiKey = import.meta.env.VITE_GROQ_API_KEY as string | undefined
 
-function getClient() {
+function getClient(): Groq {
   if (!apiKey) {
     throw new Error(
-      'VITE_GEMINI_API_KEY is not set. Add it to your .env.local file.',
+      'Groq API key is not configured. ' +
+      'In Vercel: Settings → Environment Variables → add VITE_GROQ_API_KEY, then redeploy. ' +
+      'Locally: add VITE_GROQ_API_KEY=gsk_... to your .env.local file.',
     )
   }
-  return new GoogleGenerativeAI(apiKey)
-}
-
-function getModel() {
-  return getClient().getGenerativeModel({ model: 'gemini-1.5-flash' })
+  // dangerouslyAllowBrowser: true is required for browser-side usage
+  return new Groq({ apiKey, dangerouslyAllowBrowser: true })
 }
 
 // ── Error classification ──────────────────────────────────────
@@ -32,8 +44,8 @@ function isRateLimit(err: unknown): boolean {
   return (
     err instanceof Error &&
     (err.message.includes('429') ||
-      err.message.toLowerCase().includes('quota') ||
-      err.message.toLowerCase().includes('rate'))
+      err.message.toLowerCase().includes('rate limit') ||
+      err.message.toLowerCase().includes('quota'))
   )
 }
 
@@ -65,17 +77,21 @@ function stripFences(text: string): string {
 
 // ── generateText ──────────────────────────────────────────────
 /**
- * Generates a free-text response from Gemini.
+ * Generates a free-text response using Groq.
  * Retries once on network failure (1 s delay).
- * Throws a classified error message string on failure.
  */
 export async function generateText(prompt: string): Promise<string> {
   let lastErr: unknown
 
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
-      const result = await getModel().generateContent(prompt)
-      return result.response.text()
+      const completion = await getClient().chat.completions.create({
+        model:    GROQ_MODEL,
+        messages: [{ role: 'user', content: prompt }],
+        temperature: 0.7,
+        max_tokens:  4096,
+      })
+      return completion.choices[0]?.message?.content ?? ''
     } catch (err) {
       lastErr = err
       if (isRateLimit(err)) throw new Error(classifyError(err))
@@ -87,23 +103,27 @@ export async function generateText(prompt: string): Promise<string> {
 
 // ── streamText ────────────────────────────────────────────────
 /**
- * Streams a text response token-by-token via Gemini streaming API.
- * Calls onChunk with each text chunk as it arrives.
- * Returns the full accumulated text.
+ * Streams a text response token-by-token via Groq streaming.
+ * Calls onChunk with each text fragment. Returns full text.
  */
 export async function streamText(
   prompt: string,
   onChunk: (chunk: string) => void,
 ): Promise<string> {
-  if (!apiKey) throw new Error('VITE_GEMINI_API_KEY is not set.')
-
-  const model = getClient().getGenerativeModel({ model: 'gemini-1.5-flash' })
+  if (!apiKey) throw new Error('Groq API key is not configured. Add VITE_GROQ_API_KEY in Vercel → Settings → Environment Variables, then redeploy.')
 
   try {
-    const result = await model.generateContentStream(prompt)
+    const stream = await getClient().chat.completions.create({
+      model:    GROQ_MODEL,
+      messages: [{ role: 'user', content: prompt }],
+      temperature: 0.7,
+      max_tokens:  4096,
+      stream: true,
+    })
+
     let full = ''
-    for await (const chunk of result.stream) {
-      const text = chunk.text()
+    for await (const chunk of stream) {
+      const text = chunk.choices[0]?.delta?.content ?? ''
       if (text) {
         onChunk(text)
         full += text
@@ -117,9 +137,8 @@ export async function streamText(
 
 // ── generateStructuredOutput ──────────────────────────────────
 /**
- * Generates a structured JSON response from Gemini.
- * Validates the parsed output with the provided Zod schema.
- * Throws with a descriptive message if JSON parsing or validation fails.
+ * Generates a structured JSON response from Groq.
+ * Validates with the provided Zod schema.
  */
 export async function generateStructuredOutput<T>(
   prompt: string,
@@ -151,33 +170,49 @@ export async function generateStructuredOutput<T>(
 }
 
 // ── Multi-turn chat ───────────────────────────────────────────
-/**
- * Sends a message in a multi-turn conversation context.
- * history: array of { role, parts } for prior turns.
- * Returns the model's response as a string.
- */
+
 export interface ChatTurn {
   role:  'user' | 'model'
   parts: Array<{ text: string }>
 }
 
+// Converts our internal ChatTurn format to Groq's message format
+function toGroqMessages(
+  systemPrompt: string,
+  history: ChatTurn[],
+  userMessage: string,
+): Groq.Chat.ChatCompletionMessageParam[] {
+  const messages: Groq.Chat.ChatCompletionMessageParam[] = [
+    { role: 'system', content: systemPrompt },
+  ]
+  for (const turn of history) {
+    messages.push({
+      role:    turn.role === 'user' ? 'user' : 'assistant',
+      content: turn.parts.map((p) => p.text).join(''),
+    })
+  }
+  messages.push({ role: 'user', content: userMessage })
+  return messages
+}
+
+/**
+ * Sends a message in a multi-turn conversation context.
+ */
 export async function sendChatMessage(
   systemPrompt: string,
   history: ChatTurn[],
   userMessage: string,
 ): Promise<string> {
-  if (!apiKey) throw new Error('VITE_GEMINI_API_KEY is not set.')
-
-  const model = getClient().getGenerativeModel({ model: 'gemini-1.5-flash' })
-
-  const chat = model.startChat({
-    history,
-    systemInstruction: systemPrompt,
-  })
+  if (!apiKey) throw new Error('Groq API key is not configured. Add VITE_GROQ_API_KEY in Vercel → Settings → Environment Variables, then redeploy.')
 
   try {
-    const result = await chat.sendMessage(userMessage)
-    return result.response.text()
+    const completion = await getClient().chat.completions.create({
+      model:       GROQ_MODEL,
+      messages:    toGroqMessages(systemPrompt, history, userMessage),
+      temperature: 0.7,
+      max_tokens:  2048,
+    })
+    return completion.choices[0]?.message?.content ?? ''
   } catch (err) {
     throw new Error(classifyError(err))
   }
@@ -193,20 +228,20 @@ export async function streamChatMessage(
   userMessage: string,
   onChunk: (chunk: string) => void,
 ): Promise<string> {
-  if (!apiKey) throw new Error('VITE_GEMINI_API_KEY is not set.')
-
-  const model = getClient().getGenerativeModel({ model: 'gemini-1.5-flash' })
-
-  const chat = model.startChat({
-    history,
-    systemInstruction: systemPrompt,
-  })
+  if (!apiKey) throw new Error('Groq API key is not configured. Add VITE_GROQ_API_KEY in Vercel → Settings → Environment Variables, then redeploy.')
 
   try {
-    const result = await chat.sendMessageStream(userMessage)
+    const stream = await getClient().chat.completions.create({
+      model:       GROQ_MODEL,
+      messages:    toGroqMessages(systemPrompt, history, userMessage),
+      temperature: 0.7,
+      max_tokens:  2048,
+      stream:      true,
+    })
+
     let full = ''
-    for await (const chunk of result.stream) {
-      const text = chunk.text()
+    for await (const chunk of stream) {
+      const text = chunk.choices[0]?.delta?.content ?? ''
       if (text) {
         onChunk(text)
         full += text
@@ -218,7 +253,7 @@ export async function streamChatMessage(
   }
 }
 
-// ── Zod schemas for every structured AI response ──────────────
+// ── Zod schemas (unchanged — same shapes, just different AI backend) ──
 
 export const SummarySchema = z.object({
   summary:        z.string().min(1),
@@ -279,26 +314,20 @@ export const AssignmentBreakdownSchema = z.object({
   timeline:            z.string(),
 }) satisfies z.ZodType<AssignmentBreakdown>
 
-// ── Prompt builders ───────────────────────────────────────────
-// Centralised so every feature constructs prompts the same way.
+// ── Prompt builders (unchanged) ───────────────────────────────
 
 export const Prompts = {
-  /** Academic assistant system prompt */
   academicAssistant(profile: {
-    full_name:      string | null
-    degree?:        string | null
-    university?:    string | null
-    semester?:      number | null
-    courses:        string[]
+    full_name:       string | null
+    degree?:         string | null
+    university?:     string | null
+    semester?:       number | null
+    courses:         string[]
     learning_style?: string | null
-    weak_subjects?: string[]
+    weak_subjects?:  string[]
   }, noteContext?: { title: string; content: string }): string {
-    const courseList = profile.courses.length
-      ? profile.courses.join(', ')
-      : 'not specified'
-    const weakList = profile.weak_subjects?.length
-      ? profile.weak_subjects.join(', ')
-      : 'none identified'
+    const courseList = profile.courses.length ? profile.courses.join(', ') : 'not specified'
+    const weakList   = profile.weak_subjects?.length ? profile.weak_subjects.join(', ') : 'none identified'
 
     let base = `You are CampusMate AI, an expert academic assistant for university students.
 Student: ${profile.full_name ?? 'Student'}
@@ -321,11 +350,9 @@ ${noteContext.content.slice(0, 2000)}
 
 Prioritise answers that relate to this material when relevant.`
     }
-
     return base
   },
 
-  /** Lecture summarisation */
   summarise(extractedText: string): string {
     return `You are an academic study assistant. Analyse the following lecture content and respond with a JSON object matching this exact schema:
 {
@@ -341,7 +368,6 @@ Lecture content:
 ${extractedText.slice(0, 28000)}`
   },
 
-  /** Flashcard generation */
   flashcards(text: string, count: number): string {
     return `Generate exactly ${count} flashcards from the following study material.
 Each flashcard must cover a distinct concept, definition, or fact.
@@ -352,7 +378,6 @@ Material:
 ${text.slice(0, 28000)}`
   },
 
-  /** Quiz generation */
   quiz(text: string, count: number, types: string[]): string {
     return `Generate exactly ${count} quiz questions from the following material.
 Requested question types (use only these): ${types.join(', ')}.
@@ -375,7 +400,6 @@ Material:
 ${text.slice(0, 28000)}`
   },
 
-  /** Study plan generation */
   studyPlan(params: {
     subjectsWithDates: string
     weakTopics:        string
@@ -410,7 +434,6 @@ Respond with a JSON array — no other text:
 }]`
   },
 
-  /** Partner matching */
   partnerMatch(currentProfile: string, candidates: string): string {
     return `Analyse study partner compatibility between the current student and each candidate.
 
@@ -420,12 +443,7 @@ ${currentProfile}
 Candidates:
 ${candidates}
 
-For each candidate, assess:
-- Shared enrolled courses
-- Semester proximity
-- Learning style compatibility
-- Schedule overlap
-- Complementary strengths/weaknesses
+For each candidate, assess: shared courses, semester proximity, learning style compatibility, schedule overlap, complementary strengths/weaknesses.
 
 Respond with a JSON array sorted by score descending — no other text:
 [{
@@ -433,11 +451,10 @@ Respond with a JSON array sorted by score descending — no other text:
   "score": number (0-100),
   "explanation": "string (2-3 sentences explaining the match)",
   "shared_courses": ["string"],
-  "shared_availability": ["string (e.g. Monday evenings)"]
+  "shared_availability": ["string"]
 }]`
   },
 
-  /** Assignment breakdown */
   assignmentBreakdown(title: string, description: string, deadline: string, course: string): string {
     return `You are an academic planning assistant. Help a student understand and plan their assignment.
 
