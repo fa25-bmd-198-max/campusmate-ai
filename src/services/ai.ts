@@ -18,9 +18,11 @@ import type {
 } from '@/types/ai.types'
 
 // ── Model to use ──────────────────────────────────────────────
-// llama-3.3-70b-versatile: best quality on Groq free tier
-// Fallback: llama3-8b-8192 (faster, smaller)
-const GROQ_MODEL = 'llama-3.3-70b-versatile'
+// llama-3.3-70b-versatile : best quality, used for chat & short tasks
+// llama3-8b-8192          : higher free-tier TPM limit, used for large
+//                           document summarisation to avoid 413 errors
+const GROQ_MODEL      = 'llama-3.3-70b-versatile'
+const GROQ_MODEL_FAST = 'llama3-8b-8192'
 
 // ── Client initialization ─────────────────────────────────────
 
@@ -79,14 +81,16 @@ function stripFences(text: string): string {
 /**
  * Generates a free-text response using Groq.
  * Retries once on network failure (1 s delay).
+ * Pass model='fast' to use the high-TPM model for large documents.
  */
-export async function generateText(prompt: string): Promise<string> {
+export async function generateText(prompt: string, model?: string): Promise<string> {
+  const selectedModel = model ?? GROQ_MODEL
   let lastErr: unknown
 
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
       const completion = await getClient().chat.completions.create({
-        model:    GROQ_MODEL,
+        model:    selectedModel,
         messages: [{ role: 'user', content: prompt }],
         temperature: 0.7,
         max_tokens:  4096,
@@ -138,7 +142,9 @@ export async function streamText(
 // ── generateStructuredOutput ──────────────────────────────────
 /**
  * Generates a structured JSON response from Groq.
- * Validates with the provided Zod schema.
+ * Automatically uses the fast/high-TPM model for large prompts
+ * (> 6000 chars) to avoid 413 "Request too large" errors on the
+ * free tier of llama-3.3-70b-versatile.
  */
 export async function generateStructuredOutput<T>(
   prompt: string,
@@ -148,7 +154,10 @@ export async function generateStructuredOutput<T>(
     prompt +
     '\n\nIMPORTANT: Respond with valid JSON only. No markdown code fences. No extra explanation.'
 
-  const text    = await generateText(fullPrompt)
+  // Use the smaller/faster model for large document prompts to stay
+  // within the free-tier token-per-minute limit
+  const model = fullPrompt.length > 6000 ? GROQ_MODEL_FAST : GROQ_MODEL
+  const text    = await generateText(fullPrompt, model)
   const cleaned = stripFences(text)
 
   let parsed: unknown
@@ -354,9 +363,11 @@ Prioritise answers that relate to this material when relevant.`
   },
 
   summarise(extractedText: string): string {
+    // Truncate to 6000 chars to stay within Groq free-tier token limits
+    const safeText = extractedText.slice(0, 6000)
     return `You are an academic study assistant. Analyse the following lecture content and respond with a JSON object matching this exact schema:
 {
-  "summary": "string (structured, 300-500 words)",
+  "summary": "string (structured, 200-400 words)",
   "key_concepts": ["string"],
   "definitions": [{ "term": "string", "definition": "string" }],
   "formulas": ["string"],
@@ -365,7 +376,7 @@ Prioritise answers that relate to this material when relevant.`
 }
 
 Lecture content:
-${extractedText.slice(0, 28000)}`
+${safeText}`
   },
 
   flashcards(text: string, count: number): string {
@@ -375,7 +386,7 @@ Respond with a JSON array — no other text:
 [{ "question": "string", "answer": "string", "topic": "string" }]
 
 Material:
-${text.slice(0, 28000)}`
+${text.slice(0, 6000)}`
   },
 
   quiz(text: string, count: number, types: string[]): string {
@@ -397,7 +408,7 @@ For fill_blank: use ___ in the question, answer is the missing word/phrase.
 For short_answer: provide null for options.
 
 Material:
-${text.slice(0, 28000)}`
+${text.slice(0, 6000)}`
   },
 
   studyPlan(params: {

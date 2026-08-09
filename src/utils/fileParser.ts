@@ -7,7 +7,12 @@
  * Gemini's input limits.
  */
 
-const MAX_CHARS = 30_000
+// ── Token budget for Groq free tier ──────────────────────────
+// Groq free tier (on_demand) limits to ~12,000 TPM for large models.
+// We extract at most 8,000 characters of text from each file.
+// This covers ~2,000 tokens — well within limits for summarisation.
+// The AI still produces high-quality summaries from this amount.
+const MAX_CHARS = 8_000
 
 // ── PDF ───────────────────────────────────────────────────────
 async function extractFromPDF(file: File): Promise<string> {
