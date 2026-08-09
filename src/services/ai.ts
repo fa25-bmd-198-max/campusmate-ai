@@ -18,11 +18,11 @@ import type {
 } from '@/types/ai.types'
 
 // ── Model to use ──────────────────────────────────────────────
-// llama-3.3-70b-versatile : best quality, used for chat & short tasks
-// llama3-8b-8192          : higher free-tier TPM limit, used for large
-//                           document summarisation to avoid 413 errors
+// llama-3.3-70b-versatile  : best quality, used for chat & short tasks
+// llama-3.1-8b-instant     : fast, high free-tier TPM, used for large
+//                            document summarisation to avoid 413 errors
 const GROQ_MODEL      = 'llama-3.3-70b-versatile'
-const GROQ_MODEL_FAST = 'llama3-8b-8192'
+const GROQ_MODEL_FAST = 'llama-3.1-8b-instant'
 
 // ── Client initialization ─────────────────────────────────────
 
@@ -99,6 +99,31 @@ export async function generateText(prompt: string, model?: string): Promise<stri
     } catch (err) {
       lastErr = err
       if (isRateLimit(err)) throw new Error(classifyError(err))
+
+      // If the model is decommissioned or request is too large on first attempt,
+      // retry once with the fast fallback model before giving up
+      if (
+        attempt === 0 &&
+        err instanceof Error &&
+        (err.message.includes('decommissioned') ||
+          err.message.includes('413') ||
+          err.message.includes('too large') ||
+          err.message.includes('Request too large'))
+      ) {
+        await sleep(500)
+        try {
+          const fallback = await getClient().chat.completions.create({
+            model:    GROQ_MODEL_FAST,
+            messages: [{ role: 'user', content: prompt }],
+            temperature: 0.7,
+            max_tokens:  4096,
+          })
+          return fallback.choices[0]?.message?.content ?? ''
+        } catch (fallbackErr) {
+          lastErr = fallbackErr
+        }
+      }
+
       if (attempt === 0) await sleep(1000)
     }
   }
