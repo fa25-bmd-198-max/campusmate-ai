@@ -3,33 +3,99 @@ import { Bot, User, AlertCircle } from 'lucide-react'
 import { cn } from '@/utils/cn'
 import type { ChatMessage as ChatMsg } from '@/types/ai.types'
 
-// ── Markdown-lite renderer ────────────────────────────────────
-// Renders **bold**, `code`, and newlines without a full markdown lib.
-function renderMarkdown(text: string): React.ReactNode[] {
-  const nodes: React.ReactNode[] = []
+// ── Markdown renderer ─────────────────────────────────────────
+// Handles headings (###), bullet lists (* / -), bold (**), inline code (`)
+// and newlines — without adding a full markdown library.
+function renderMarkdown(text: string): React.ReactNode {
   const lines = text.split('\n')
+  const elements: React.ReactNode[] = []
+  let i = 0
 
-  lines.forEach((line, li) => {
-    // Split on **bold** and `code`
-    const parts = line.split(/(\*\*[^*]+\*\*|`[^`]+`)/g)
-    const rendered = parts.map((part, pi) => {
-      if (part.startsWith('**') && part.endsWith('**')) {
-        return <strong key={pi}>{part.slice(2, -2)}</strong>
+  while (i < lines.length) {
+    const line = lines[i]
+
+    // ── Heading: ### or ####
+    if (/^#{1,4}\s/.test(line)) {
+      const level = (line.match(/^#+/) ?? [''])[0].length
+      const content = line.replace(/^#+\s*/, '')
+      const cls = level <= 2
+        ? 'text-sm font-bold text-gray-900 dark:text-gray-100 mt-3 mb-1'
+        : 'text-sm font-semibold text-gray-800 dark:text-gray-200 mt-2 mb-0.5'
+      elements.push(<p key={i} className={cls}>{inlineMarkdown(content)}</p>)
+      i++
+      continue
+    }
+
+    // ── Bullet list: lines starting with * or -
+    if (/^[\*\-]\s/.test(line)) {
+      const items: string[] = []
+      while (i < lines.length && /^[\*\-]\s/.test(lines[i])) {
+        items.push(lines[i].replace(/^[\*\-]\s*/, ''))
+        i++
       }
-      if (part.startsWith('`') && part.endsWith('`')) {
-        return (
-          <code key={pi} className="rounded bg-gray-200/80 px-1 py-0.5 text-xs font-mono dark:bg-gray-700/80">
-            {part.slice(1, -1)}
-          </code>
-        )
+      elements.push(
+        <ul key={`ul-${i}`} className="my-1 space-y-1 pl-4 list-disc">
+          {items.map((item, idx) => (
+            <li key={idx} className="text-sm leading-relaxed">{inlineMarkdown(item)}</li>
+          ))}
+        </ul>
+      )
+      continue
+    }
+
+    // ── Numbered list: lines starting with 1. 2. etc.
+    if (/^\d+\.\s/.test(line)) {
+      const items: string[] = []
+      while (i < lines.length && /^\d+\.\s/.test(lines[i])) {
+        items.push(lines[i].replace(/^\d+\.\s*/, ''))
+        i++
       }
-      return part
-    })
-    nodes.push(<span key={li}>{rendered}</span>)
-    if (li < lines.length - 1) nodes.push(<br key={`br-${li}`} />)
+      elements.push(
+        <ol key={`ol-${i}`} className="my-1 space-y-1 pl-4 list-decimal">
+          {items.map((item, idx) => (
+            <li key={idx} className="text-sm leading-relaxed">{inlineMarkdown(item)}</li>
+          ))}
+        </ol>
+      )
+      continue
+    }
+
+    // ── Empty line → spacer
+    if (line.trim() === '') {
+      elements.push(<div key={i} className="h-1.5" />)
+      i++
+      continue
+    }
+
+    // ── Normal paragraph line
+    elements.push(
+      <p key={i} className="text-sm leading-relaxed">{inlineMarkdown(line)}</p>
+    )
+    i++
+  }
+
+  return <>{elements}</>
+}
+
+// Inline markdown: **bold**, *italic*, `code`
+function inlineMarkdown(text: string): React.ReactNode[] {
+  const parts = text.split(/(\*\*[^*]+\*\*|\*[^*]+\*|`[^`]+`)/g)
+  return parts.map((part, i) => {
+    if (part.startsWith('**') && part.endsWith('**')) {
+      return <strong key={i} className="font-semibold">{part.slice(2, -2)}</strong>
+    }
+    if (part.startsWith('*') && part.endsWith('*') && part.length > 2) {
+      return <em key={i}>{part.slice(1, -1)}</em>
+    }
+    if (part.startsWith('`') && part.endsWith('`')) {
+      return (
+        <code key={i} className="rounded bg-gray-200/80 px-1 py-0.5 text-xs font-mono dark:bg-gray-700/80">
+          {part.slice(1, -1)}
+        </code>
+      )
+    }
+    return <span key={i}>{part}</span>
   })
-
-  return nodes
 }
 
 // ── Typing indicator ──────────────────────────────────────────
@@ -117,7 +183,7 @@ const ChatMessage = memo(function ChatMessage({
           {isAssistant && message.streaming && !message.content ? (
             <TypingIndicator />
           ) : (
-            <p aria-live={isAssistant ? 'polite' : undefined}>
+            <div aria-live={isAssistant ? 'polite' : undefined}>
               {renderMarkdown(message.content)}
               {/* Blinking cursor while streaming */}
               {isAssistant && message.streaming && (
@@ -126,7 +192,7 @@ const ChatMessage = memo(function ChatMessage({
                   aria-hidden="true"
                 />
               )}
-            </p>
+            </div>
           )}
         </div>
 
