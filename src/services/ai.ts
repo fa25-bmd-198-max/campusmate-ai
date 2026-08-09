@@ -68,13 +68,76 @@ function sleep(ms: number) {
   return new Promise<void>((resolve) => setTimeout(resolve, ms))
 }
 
-// ── JSON fence stripper ───────────────────────────────────────
-
-function stripFences(text: string): string {
-  return text
+// ── JSON extraction (robust) ──────────────────────────────────
+/**
+ * Extracts the first valid JSON object `{...}` or array `[...]`
+ * from a raw AI response, regardless of surrounding text.
+ *
+ * Handles all of these real-world LLaMA output patterns:
+ *   - Clean JSON:          `{ "summary": "..." }`
+ *   - Fenced JSON:         ```json\n{ ... }\n```
+ *   - Prefixed JSON:       `Here is the JSON:\n{ ... }`
+ *   - Suffixed JSON:       `{ ... }\nLet me know if you need anything.`
+ *   - Nested quote issues: stray backticks or line breaks inside strings
+ */
+function extractJSON(raw: string): string {
+  // 1. Strip markdown code fences
+  let text = raw
     .replace(/^```(?:json)?\s*/im, '')
     .replace(/\s*```\s*$/im, '')
     .trim()
+
+  // 2. Find outermost { } or [ ] — whichever comes first
+  const objStart   = text.indexOf('{')
+  const arrStart   = text.indexOf('[')
+
+  let startChar: '{' | '[' | null = null
+  let endChar:   '}' | ']' | null = null
+  let startIdx = -1
+
+  if (objStart === -1 && arrStart === -1) {
+    // No JSON structure found at all — return as-is and let parse fail naturally
+    return text
+  } else if (objStart === -1) {
+    startChar = '['; endChar = ']'; startIdx = arrStart
+  } else if (arrStart === -1) {
+    startChar = '{'; endChar = '}'; startIdx = objStart
+  } else {
+    // Take whichever comes first
+    if (objStart < arrStart) {
+      startChar = '{'; endChar = '}'; startIdx = objStart
+    } else {
+      startChar = '['; endChar = ']'; startIdx = arrStart
+    }
+  }
+
+  // 3. Walk forward tracking brace depth to find the matching close
+  let depth = 0
+  let endIdx = -1
+  let inString = false
+  let escape   = false
+
+  for (let i = startIdx; i < text.length; i++) {
+    const ch = text[i]
+
+    if (escape) { escape = false; continue }
+    if (ch === '\\' && inString) { escape = true; continue }
+    if (ch === '"') { inString = !inString; continue }
+    if (inString) continue
+
+    if (ch === startChar) depth++
+    else if (ch === endChar) {
+      depth--
+      if (depth === 0) { endIdx = i; break }
+    }
+  }
+
+  if (endIdx === -1) {
+    // Couldn't find balanced close — return from startIdx to end
+    return text.slice(startIdx).trim()
+  }
+
+  return text.slice(startIdx, endIdx + 1).trim()
 }
 
 // ── generateText ──────────────────────────────────────────────
@@ -177,21 +240,32 @@ export async function generateStructuredOutput<T>(
 ): Promise<T> {
   const fullPrompt =
     prompt +
-    '\n\nIMPORTANT: Respond with valid JSON only. No markdown code fences. No extra explanation.'
+    '\n\nCRITICAL INSTRUCTION: Your entire response must be ONLY the raw JSON. ' +
+    'Do NOT include any explanation, greeting, markdown code fences, or text outside the JSON. ' +
+    'Start your response with { or [ and end with } or ].'
 
-  // Use the smaller/faster model for large document prompts to stay
-  // within the free-tier token-per-minute limit
+  // Use the smaller/faster model for large document prompts
   const model = fullPrompt.length > 6000 ? GROQ_MODEL_FAST : GROQ_MODEL
-  const text    = await generateText(fullPrompt, model)
-  const cleaned = stripFences(text)
+  const raw   = await generateText(fullPrompt, model)
+
+  // Robust JSON extraction — handles conversational prefixes/suffixes,
+  // fenced blocks, and any stray characters around the JSON structure
+  const cleaned = extractJSON(raw)
 
   let parsed: unknown
   try {
     parsed = JSON.parse(cleaned)
   } catch {
-    throw new Error(
-      `AI returned invalid JSON.\nFirst 500 chars of response:\n${cleaned.slice(0, 500)}`,
-    )
+    // Last resort: try to parse the original raw text with extractJSON on trimmed raw
+    const fallback = extractJSON(raw.trim())
+    try {
+      parsed = JSON.parse(fallback)
+    } catch {
+      throw new Error(
+        `AI returned invalid JSON. Please try again.\n` +
+        `First 300 chars of response: ${raw.slice(0, 300)}`,
+      )
+    }
   }
 
   const result = schema.safeParse(parsed)
