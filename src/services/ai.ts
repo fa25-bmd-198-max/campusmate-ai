@@ -315,12 +315,18 @@ export async function generateStructuredOutput<T>(
     ? prompt.slice(0, STRUCTURED_CONTENT_LIMIT) + instruction
     : prompt + instruction
 
+  // Use more tokens for array outputs (quiz/flashcards need ~80-120 tokens per item).
+  // Detect by checking if the prompt asks for an array (starts with '[').
+  // Summary prompts start with '{', array prompts start with '['.
+  const expectsArray = safePrompt.trimStart().includes('Output ONLY a JSON array') ||
+                       safePrompt.trimStart().includes('Output ONLY valid JSON:\n[')
+  const maxTokens = expectsArray ? 2500 : 1200
+
   // Structured tasks: FAST → MEDIUM → BEST
-  // 1200 tokens: enough for a full summary JSON with all fields, even verbose models.
   const raw = await callWithCascade(
     safePrompt,
     [MODEL_FAST, MODEL_MEDIUM, MODEL_BEST],
-    1200,
+    maxTokens,
   )
 
   // Try to parse cleaned JSON, then fall back to raw
@@ -333,7 +339,6 @@ export async function generateStructuredOutput<T>(
     try {
       parsed = JSON.parse(raw.trim())
     } catch {
-      // Never expose raw AI output to the user
       throw new Error('AI returned an unexpected response. Please try uploading again.')
     }
   }
@@ -342,8 +347,8 @@ export async function generateStructuredOutput<T>(
   const result = schema.safeParse(parsed)
   if (result.success) return result.data
 
-  // Second attempt: if parsed is an object, merge with safe defaults and re-parse.
-  // This handles truncated responses where some fields parsed but others are missing.
+  // Second attempt: object coercion — merge with safe defaults.
+  // Handles truncated summary responses where some fields are missing.
   if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) {
     const coerced: Record<string, unknown> = {
       summary:        '',
@@ -354,7 +359,6 @@ export async function generateStructuredOutput<T>(
       exam_topics:    [],
       ...(parsed as Record<string, unknown>),
     }
-    // Sanitise: ensure arrays are actually arrays, strings are strings
     for (const key of ['key_concepts', 'definitions', 'formulas', 'exam_topics']) {
       if (!Array.isArray(coerced[key])) coerced[key] = []
     }
@@ -365,12 +369,29 @@ export async function generateStructuredOutput<T>(
     if (coercedResult.success) return coercedResult.data
   }
 
-  // Final attempt: arrays (flashcards, quiz) — if parsed is already an array, accept partial
+  // Third attempt: array coercion — filter out any items that fail per-item validation.
+  // This handles quiz/flashcard responses where the AI produces mostly good items
+  // but one or two items have a minor schema violation.
   if (Array.isArray(parsed) && parsed.length > 0) {
-    // Filter to only items that pass item-level validation by testing against the schema
-    // with whatever we have; if it still fails, throw.
+    // Try the full array first (already tried above but with a fresh .catch-equipped schema)
     const arrayResult = schema.safeParse(parsed)
     if (arrayResult.success) return arrayResult.data
+
+    // Filter: keep only items that parse cleanly as individual objects.
+    // Wrap in an array schema that uses .catch([]) so bad items are dropped.
+    const filtered = parsed.filter((item) => {
+      if (item === null || typeof item !== 'object') return false
+      // Accept if the item has at minimum a non-empty question/answer string field
+      const obj = item as Record<string, unknown>
+      return (
+        (typeof obj['question'] === 'string' && obj['question'].length > 0) ||
+        (typeof obj['answer']   === 'string' && obj['answer'].length   > 0)
+      )
+    })
+    if (filtered.length > 0) {
+      const filteredResult = schema.safeParse(filtered)
+      if (filteredResult.success) return filteredResult.data
+    }
   }
 
   throw new Error('AI returned an unexpected response. Please try uploading again.')
@@ -477,20 +498,25 @@ export const SummarySchema = z.object({
 }) as z.ZodType<SummaryResult>
 
 export const FlashcardItemSchema = z.object({
-  question: z.string().min(1),
-  answer:   z.string().min(1),
-  topic:    z.string().default('General'),
+  question: z.string().min(1).catch(''),
+  answer:   z.string().min(1).catch(''),
+  topic:    z.string().catch('General'),
 })
 
 export const FlashcardsSchema: z.ZodType<FlashcardItem[]> =
   z.array(FlashcardItemSchema) as z.ZodType<FlashcardItem[]>
 
 export const QuizItemSchema = z.object({
-  type:           z.enum(['mcq', 'true_false', 'fill_blank', 'short_answer']),
-  question:       z.string().min(1),
-  options:        z.array(z.string()).nullable().default(null),
-  correct_answer: z.string().min(1),
-  explanation:    z.string().default(''),
+  type:           z.enum(['mcq', 'true_false', 'fill_blank', 'short_answer']).catch('mcq' as const),
+  question:       z.string().min(1).catch(''),
+  // Accept null, undefined, OR empty array — normalise all to null for non-MCQ types.
+  // Some models return [] instead of null; treat those as null.
+  options:        z.preprocess(
+    (v) => (Array.isArray(v) && v.length === 0 ? null : v),
+    z.array(z.string()).nullable().catch(null),
+  ),
+  correct_answer: z.string().catch(''),
+  explanation:    z.string().catch(''),
 })
 
 export const QuizSchema: z.ZodType<QuizItem[]> =
@@ -583,11 +609,26 @@ export const Prompts = {
   },
 
   quiz(text: string, count: number, types: string[]): string {
+    // Quiz prompts need more content space than summaries — cap higher.
+    const content = text.slice(0, STRUCTURED_CONTENT_LIMIT - 300)
+    const typeMap: Record<string, string> = {
+      mcq:          'mcq (4 options array)',
+      true_false:   'true_false (options must be null)',
+      fill_blank:   'fill_blank (options must be null, use ___ in question)',
+      short_answer: 'short_answer (options must be null)',
+    }
+    const typeDesc = types.map((t) => typeMap[t] ?? t).join(', ')
     return (
-      `Create ${count} quiz questions (types: ${types.join(', ')}). Output ONLY a JSON array:\n` +
-      `[{"type":"mcq","question":"q","options":["A","B","C","D"],"correct_answer":"A","explanation":"e"}]\n` +
-      `MCQ=4 options. true_false: options=null. fill_blank: use ___. short_answer: options=null.\n\n` +
-      `Content:\n${text.slice(0, STRUCTURED_CONTENT_LIMIT - 200)}`
+      `Create exactly ${count} quiz questions. Types to use: ${typeDesc}.\n` +
+      `Output ONLY a JSON array, no other text:\n` +
+      `[{"type":"mcq","question":"What is X?","options":["A","B","C","D"],"correct_answer":"A","explanation":"Because..."},` +
+      `{"type":"true_false","question":"X is true.","options":null,"correct_answer":"True","explanation":"Because..."}]\n\n` +
+      `Rules:\n` +
+      `- mcq: options array with exactly 4 strings, correct_answer is one of the options\n` +
+      `- true_false: options must be null, correct_answer is "True" or "False"\n` +
+      `- fill_blank: options must be null, use ___ in question\n` +
+      `- short_answer: options must be null\n\n` +
+      `Content:\n${content}`
     )
   },
 
