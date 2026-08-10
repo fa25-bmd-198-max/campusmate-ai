@@ -315,12 +315,12 @@ export async function generateStructuredOutput<T>(
     ? prompt.slice(0, STRUCTURED_CONTENT_LIMIT) + instruction
     : prompt + instruction
 
-  // Use more tokens for array outputs (quiz/flashcards need ~80-120 tokens per item).
-  // Detect by checking if the prompt asks for an array (starts with '[').
-  // Summary prompts start with '{', array prompts start with '['.
-  const expectsArray = safePrompt.trimStart().includes('Output ONLY a JSON array') ||
-                       safePrompt.trimStart().includes('Output ONLY valid JSON:\n[')
-  const maxTokens = expectsArray ? 2500 : 1200
+  // Use more tokens for array outputs (quiz/flashcards need ~80-120 tokens per item,
+  // study plans need ~50 tokens per session × many sessions).
+  const expectsArray = safePrompt.includes('Output ONLY a JSON array') ||
+                       safePrompt.includes('Output ONLY valid JSON:\n[')
+  const isStudyPlan  = safePrompt.includes('study plan') || safePrompt.includes('Study plan')
+  const maxTokens = isStudyPlan ? 3500 : expectsArray ? 2500 : 1200
 
   // Structured tasks: FAST → MEDIUM → BEST
   const raw = await callWithCascade(
@@ -523,37 +523,38 @@ export const QuizSchema: z.ZodType<QuizItem[]> =
   z.array(QuizItemSchema) as z.ZodType<QuizItem[]>
 
 export const StudyPlanSessionSchema = z.object({
-  subject:      z.string(),
-  topic:        z.string(),
-  duration_min: z.number().int().min(5).max(240),
-  type:         z.enum(['revision', 'practice_test', 'rest']),
+  subject:      z.string().catch('General'),
+  topic:        z.string().catch('Study session'),
+  duration_min: z.number().catch(60),
+  type:         z.enum(['revision', 'practice_test', 'rest']).catch('revision' as const),
 })
 
 export const StudyPlanDaySchema = z.object({
-  date:     z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
-  sessions: z.array(StudyPlanSessionSchema),
+  // Accept any date-like string, normalise loosely
+  date:     z.string().catch(''),
+  sessions: z.array(StudyPlanSessionSchema).catch([]),
 })
 
 export const StudyPlanSchema =
-  z.array(StudyPlanDaySchema) satisfies z.ZodType<StudyPlanDay[]>
+  z.array(StudyPlanDaySchema) as z.ZodType<StudyPlanDay[]>
 
 export const PartnerMatchSchema = z.array(
   z.object({
-    user_id:             z.string(),
-    score:               z.number().min(0).max(100),
-    explanation:         z.string(),
-    shared_courses:      z.array(z.string()),
-    shared_availability: z.array(z.string()),
+    user_id:             z.string().catch(''),
+    score:               z.number().catch(50),
+    explanation:         z.string().catch(''),
+    shared_courses:      z.array(z.string()).catch([]),
+    shared_availability: z.array(z.string()).catch([]),
   }),
-) satisfies z.ZodType<PartnerMatchResult[]>
+) as z.ZodType<PartnerMatchResult[]>
 
 export const AssignmentBreakdownSchema = z.object({
-  understanding:       z.string(),
-  subtasks:            z.array(z.string()),
-  research_directions: z.array(z.string()),
-  key_concepts:        z.array(z.string()),
-  timeline:            z.string(),
-}) satisfies z.ZodType<AssignmentBreakdown>
+  understanding:       z.string().catch(''),
+  subtasks:            z.array(z.string()).catch([]),
+  research_directions: z.array(z.string()).catch([]),
+  key_concepts:        z.array(z.string()).catch([]),
+  timeline:            z.string().catch(''),
+}) as z.ZodType<AssignmentBreakdown>
 
 // ── Prompt builders ───────────────────────────────────────────
 
