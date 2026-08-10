@@ -11,7 +11,6 @@ const LoginPage          = lazy(() => import('@/pages/auth/LoginPage'))
 const RegisterPage       = lazy(() => import('@/pages/auth/RegisterPage'))
 const ForgotPasswordPage = lazy(() => import('@/pages/auth/ForgotPasswordPage'))
 const ResetPasswordPage  = lazy(() => import('@/pages/auth/ResetPasswordPage'))
-const VerifyEmailPage    = lazy(() => import('@/pages/auth/VerifyEmailPage'))
 
 // ── App pages (inside AppLayout shell) ───────────────────────
 const OnboardingPage          = lazy(() => import('@/pages/onboarding/OnboardingPage'))
@@ -53,7 +52,8 @@ export default function AppRouter() {
           <Route path="/register"        element={<RegisterPage />} />
           <Route path="/forgot-password" element={<ForgotPasswordPage />} />
           <Route path="/reset-password"  element={<ResetPasswordPage />} />
-          <Route path="/verify-email"    element={<VerifyEmailPage />} />
+          {/* /verify-email is unused (email confirmation disabled) — redirect to login */}
+          <Route path="/verify-email"    element={<Navigate to="/login" replace />} />
 
           {/* ── Protected routes — auth check ──────────────────── */}
           <Route element={<ProtectedRoute />}>

@@ -10,36 +10,72 @@ export interface AuthResult {
 }
 
 export interface SignUpData {
-  email:     string
-  password:  string
-  full_name: string
+  email:      string
+  password:   string
+  full_name:  string
+  /**
+   * Called BEFORE supabase.auth.signUp() so AuthContext can arm its
+   * SIGNED_IN block before the event fires.
+   */
+  onBeforeSignUp?: () => void
+  /**
+   * Called AFTER supabase.auth.signOut() resolves so AuthContext can
+   * disarm its block once the auto-session has been fully cleared.
+   */
+  onAfterSignOut?: () => void
 }
 
 // ── Sign Up ───────────────────────────────────────────────────
 
 /**
- * Registers a new user with email + password.
- * Passes full_name as user metadata so the handle_new_user trigger
- * can pre-populate the profiles row.
+ * Registers a new user then IMMEDIATELY destroys the auto-created session.
+ *
+ * Supabase creates a live session on signUp() when email confirmation is
+ * disabled. We destroy it in three layers:
+ *
+ *   1. onBeforeSignUp() — arms a SIGNED_IN block in AuthContext so the
+ *      auto-session event is dropped before React ever re-renders with it.
+ *   2. supabase.auth.signOut() — destroys the session server-side and in
+ *      localStorage, fires SIGNED_OUT which sets context.session = null.
+ *   3. onAfterSignOut() — disarms the block so future logins work normally.
+ *
+ * The returned session is always null.
  */
-export async function signUp({ email, password, full_name }: SignUpData): Promise<AuthResult> {
+export async function signUp({
+  email,
+  password,
+  full_name,
+  onBeforeSignUp,
+  onAfterSignOut,
+}: SignUpData): Promise<AuthResult> {
+  // Layer 1 — arm the block BEFORE the signUp call so the SIGNED_IN event
+  // that fires synchronously inside signUp() is caught immediately.
+  onBeforeSignUp?.()
+
   const { data, error } = await supabase.auth.signUp({
     email,
     password,
-    options: {
-      data: { full_name },
-      // Redirect URL after email verification — overridden by Supabase project settings in prod
-      emailRedirectTo: `${window.location.origin}/verify-email`,
-    },
+    options: { data: { full_name } },
   })
-  return { user: data.user, session: data.session, error }
+
+  if (error) {
+    // Registration failed — no session was created.
+    // Disarm the block so logins still work.
+    onAfterSignOut?.()
+    return { user: data.user, session: null, error }
+  }
+
+  // Layer 2 — destroy the auto-created session.
+  await supabase.auth.signOut()
+
+  // Layer 3 — disarm the block.
+  onAfterSignOut?.()
+
+  return { user: data.user, session: null, error: null }
 }
 
 // ── Sign In ───────────────────────────────────────────────────
 
-/**
- * Authenticates an existing user with email + password.
- */
 export async function signIn(email: string, password: string): Promise<AuthResult> {
   const { data, error } = await supabase.auth.signInWithPassword({ email, password })
   return { user: data.user, session: data.session, error }
@@ -47,9 +83,6 @@ export async function signIn(email: string, password: string): Promise<AuthResul
 
 // ── Sign Out ──────────────────────────────────────────────────
 
-/**
- * Ends the current session and clears local storage.
- */
 export async function signOut(): Promise<{ error: AuthError | null }> {
   const { error } = await supabase.auth.signOut()
   return { error }
@@ -57,12 +90,6 @@ export async function signOut(): Promise<{ error: AuthError | null }> {
 
 // ── Password Recovery ─────────────────────────────────────────
 
-/**
- * Sends a password reset email to the given address.
- * Uses a generic success message to prevent account enumeration —
- * the caller should always show the same UI regardless of whether
- * the email exists.
- */
 export async function sendPasswordResetEmail(email: string): Promise<{ error: AuthError | null }> {
   const { error } = await supabase.auth.resetPasswordForEmail(email, {
     redirectTo: `${window.location.origin}/reset-password`,
@@ -70,11 +97,6 @@ export async function sendPasswordResetEmail(email: string): Promise<{ error: Au
   return { error }
 }
 
-/**
- * Updates the authenticated user's password.
- * Must be called from the reset-password page after the user
- * has clicked the reset link (which sets a valid session).
- */
 export async function updatePassword(newPassword: string): Promise<{ error: AuthError | null }> {
   const { error } = await supabase.auth.updateUser({ password: newPassword })
   return { error }
@@ -82,9 +104,6 @@ export async function updatePassword(newPassword: string): Promise<{ error: Auth
 
 // ── Email Verification ────────────────────────────────────────
 
-/**
- * Re-sends the email verification link for the given address.
- */
 export async function resendVerificationEmail(email: string): Promise<{ error: AuthError | null }> {
   const { error } = await supabase.auth.resend({
     type:  'signup',
@@ -96,26 +115,16 @@ export async function resendVerificationEmail(email: string): Promise<{ error: A
 
 // ── Session Helpers ───────────────────────────────────────────
 
-/**
- * Returns the current active session, or null if unauthenticated.
- */
 export async function getSession(): Promise<Session | null> {
   const { data } = await supabase.auth.getSession()
   return data.session
 }
 
-/**
- * Returns the currently authenticated user, or null.
- */
 export async function getCurrentUser(): Promise<User | null> {
   const { data } = await supabase.auth.getUser()
   return data.user
 }
 
-/**
- * Subscribes to auth state changes. Returns an unsubscribe function.
- * Used by AuthContext to keep session state in sync.
- */
 export function onAuthStateChange(
   callback: (event: string, session: Session | null) => void,
 ) {
@@ -125,10 +134,6 @@ export function onAuthStateChange(
 
 // ── Update User Metadata ──────────────────────────────────────
 
-/**
- * Updates auth-level user metadata (email or password).
- * Profile fields (name, university, etc.) go through profileService instead.
- */
 export async function updateEmail(newEmail: string): Promise<{ error: AuthError | null }> {
   const { error } = await supabase.auth.updateUser({ email: newEmail })
   return { error }

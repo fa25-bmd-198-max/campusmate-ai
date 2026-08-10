@@ -3,7 +3,7 @@ import { Link, Navigate, useLocation, useNavigate } from 'react-router-dom'
 import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { z } from 'zod'
-import { Mail, Lock, Eye, EyeOff } from 'lucide-react'
+import { Mail, Lock, Eye, EyeOff, CheckCircle } from 'lucide-react'
 import AuthLayout from '@/components/layout/AuthLayout'
 import { Button, Input } from '@/components/ui'
 import { useAuth } from '@/hooks/useAuth'
@@ -23,6 +23,7 @@ export default function LoginPage() {
   const [showPassword, setShowPassword] = useState(false)
 
   const from = (location.state as { from?: { pathname: string } } | null)?.from?.pathname ?? '/dashboard'
+  const successMessage = (location.state as { successMessage?: string } | null)?.successMessage ?? ''
 
   const {
     register,
@@ -38,19 +39,9 @@ export default function LoginPage() {
     const { error } = await signIn(data.email, data.password)
 
     if (error) {
-      // Show a specific message for the email-not-confirmed case
-      const msg = error.message.toLowerCase()
-      if (msg.includes('email not confirmed') || msg.includes('not confirmed')) {
-        setError('root', {
-          message:
-            'Please verify your email before signing in. Check your inbox for the verification link, or use "Forgot password?" to request a new one.',
-        })
-      } else {
-        // Generic message for wrong credentials — do not reveal which field is wrong
-        setError('root', {
-          message: 'Invalid email or password. Please try again.',
-        })
-      }
+      setError('root', {
+        message: 'Invalid email or password. Please try again.',
+      })
       return
     }
 
@@ -63,6 +54,14 @@ export default function LoginPage() {
       subtitle="Sign in to continue to CampusMate AI"
     >
       <form onSubmit={handleSubmit(onSubmit)} noValidate className="space-y-4">
+        {/* Registration success banner */}
+        {successMessage && (
+          <div role="status" className="flex items-center gap-2 rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-700 dark:border-emerald-800 dark:bg-emerald-900/20 dark:text-emerald-400">
+            <CheckCircle className="h-4 w-4 shrink-0" aria-hidden="true" />
+            {successMessage}
+          </div>
+        )}
+
         {/* Root error */}
         {errors.root && (
           <div role="alert" className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 dark:border-red-800 dark:bg-red-900/20 dark:text-red-400">

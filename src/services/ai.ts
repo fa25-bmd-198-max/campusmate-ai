@@ -1,9 +1,23 @@
 // ============================================================
 // AI Service — powered by Groq (free, no billing required)
-// Model: llama-3.3-70b-versatile (fast, high-quality, free tier)
 //
-// All exported function signatures are identical to the previous
-// Gemini implementation — no other files need to change.
+// Model cascade (tried in order):
+//   1. llama-3.1-8b-instant   — fast, 6,000 TPM free tier
+//   2. gemma2-9b-it            — 5,000 TPM, reliable fallback
+//   3. llama-3.3-70b-versatile — 12,000 TPM, best quality
+//
+// We start structured/document tasks on the FAST model to preserve
+// the large model's TPM budget for the chat assistant.
+//
+// TOKEN BUDGET (llama-3.1-8b-instant, 6,000 TPM free tier):
+//   ~100 tokens  = prompt instructions ("Output ONLY this JSON...")
+//   ~100 tokens  = JSON schema example in prompt
+//   ~400 tokens  = extracted text (1,600 chars ÷ 4 chars/token)
+//   ~600 tokens  = AI JSON response (generous ceiling)
+//   ~200 tokens  = Groq model overhead / system tokens
+//   ──────────────────────────────────────────────────────────
+//   ~1,400 tokens total — safely under 6,000 TPM even for
+//   consecutive uploads and worst-case non-ASCII content.
 // ============================================================
 
 import Groq from 'groq-sdk'
@@ -17,15 +31,28 @@ import type {
   AssignmentBreakdown,
 } from '@/types/ai.types'
 
-// ── Model to use ──────────────────────────────────────────────
-// llama-3.3-70b-versatile  : best quality, used for chat & short tasks
-// llama-3.1-8b-instant     : fast, high free-tier TPM, used for large
-//                            document summarisation to avoid 413 errors
-const GROQ_MODEL      = 'llama-3.3-70b-versatile'
-const GROQ_MODEL_FAST = 'llama-3.1-8b-instant'
+// ── Models ────────────────────────────────────────────────────
+const MODEL_FAST   = 'llama-3.1-8b-instant'     // 6,000 TPM  — structured tasks
+const MODEL_MEDIUM = 'gemma2-9b-it'              // 5,000 TPM  — fallback
+const MODEL_BEST   = 'llama-3.3-70b-versatile'  // 12,000 TPM — chat / complex tasks
 
-// ── Client initialization ─────────────────────────────────────
+// ── Hard content limit ────────────────────────────────────────
+// ALL content sent to structured AI calls is capped here.
+// This is the single source of truth — fileParser.ts also caps at its own
+// MAX_CHARS but this second cap ensures nothing slips through regardless
+// of how the prompt is constructed.
+//
+// Raised to 3,000 chars (~750 tokens) since we now allow 1,200 tokens for the
+// response. Total budget stays well under the 6,000 TPM free tier:
+//   ~200 tokens  prompt instructions + JSON template
+//   ~750 tokens  lecture content (3,000 chars ÷ 4)
+//   ~1,200 tokens AI JSON response
+//   ~200 tokens  model overhead
+//   ──────────────────────────────────────────────
+//   ~2,350 tokens total — safely under 6,000 TPM
+const STRUCTURED_CONTENT_LIMIT = 3_000   // chars → ~750 tokens
 
+// ── Client ────────────────────────────────────────────────────
 const apiKey = import.meta.env.VITE_GROQ_API_KEY as string | undefined
 
 function getClient(): Groq {
@@ -36,31 +63,49 @@ function getClient(): Groq {
       'Locally: add VITE_GROQ_API_KEY=gsk_... to your .env.local file.',
     )
   }
-  // dangerouslyAllowBrowser: true is required for browser-side usage
   return new Groq({ apiKey, dangerouslyAllowBrowser: true })
 }
 
-// ── Error classification ──────────────────────────────────────
+// ── Error helpers ─────────────────────────────────────────────
 
-function isRateLimit(err: unknown): boolean {
+/** True when Groq says the request body is too large for this model's context */
+function isRequestTooLarge(err: unknown): boolean {
+  if (!(err instanceof Error)) return false
+  const m = err.message
+  return m.includes('413') || m.includes('Request too large') || m.includes('too large')
+}
+
+/** True when Groq says a model has been decommissioned */
+function isDecommissioned(err: unknown): boolean {
+  return err instanceof Error && err.message.includes('decommissioned')
+}
+
+/** True when Groq returns a TPM / RPM rate-limit response */
+function isTPMRateLimit(err: unknown): boolean {
+  if (!(err instanceof Error)) return false
+  const m = err.message
   return (
-    err instanceof Error &&
-    (err.message.includes('429') ||
-      err.message.toLowerCase().includes('rate limit') ||
-      err.message.toLowerCase().includes('quota'))
+    m.includes('TPM') ||
+    m.includes('rate_limit') ||
+    (m.includes('429') && m.includes('token'))
   )
 }
 
-function isNetworkError(err: unknown): boolean {
-  return err instanceof Error && err.message.toLowerCase().includes('fetch')
+/** True for any error where the solution is "use a different model" */
+function shouldSwitchModel(err: unknown): boolean {
+  return isRequestTooLarge(err) || isDecommissioned(err)
 }
 
 function classifyError(err: unknown): string {
-  if (isRateLimit(err))
-    return 'AI rate limit reached. Please wait 30 seconds and try again.'
-  if (isNetworkError(err))
-    return 'Connection error. Please check your internet and try again.'
-  if (err instanceof Error) return err.message
+  if (err instanceof Error) {
+    if (isTPMRateLimit(err))
+      return 'AI is temporarily busy. Please wait a moment and try again.'
+    if (isRequestTooLarge(err))
+      return 'File content is too large for AI processing. Try a shorter file.'
+    if (err.message.toLowerCase().includes('fetch'))
+      return 'Connection error. Please check your internet and try again.'
+    return err.message
+  }
   return 'An unexpected AI error occurred. Please try again.'
 }
 
@@ -68,213 +113,267 @@ function sleep(ms: number) {
   return new Promise<void>((resolve) => setTimeout(resolve, ms))
 }
 
-// ── JSON extraction (robust) ──────────────────────────────────
+// ── Robust JSON extractor + repairer ─────────────────────────
 /**
- * Extracts the first valid JSON object `{...}` or array `[...]`
- * from a raw AI response, regardless of surrounding text.
+ * Extracts and repairs the first complete JSON object `{...}` or array `[...]`
+ * from a raw LLM response.
  *
- * Handles all of these real-world LLaMA output patterns:
- *   - Clean JSON:          `{ "summary": "..." }`
- *   - Fenced JSON:         ```json\n{ ... }\n```
- *   - Prefixed JSON:       `Here is the JSON:\n{ ... }`
- *   - Suffixed JSON:       `{ ... }\nLet me know if you need anything.`
- *   - Nested quote issues: stray backticks or line breaks inside strings
+ * Handles:
+ * - Markdown code fences (```json ... ```)
+ * - Conversational prefix/suffix text
+ * - Truncated/incomplete JSON (closes unclosed braces/brackets)
+ * - Trailing commas before closing delimiters
  */
 function extractJSON(raw: string): string {
-  // 1. Strip markdown code fences
+  // 1. Strip markdown fences
   let text = raw
-    .replace(/^```(?:json)?\s*/im, '')
-    .replace(/\s*```\s*$/im, '')
+    .replace(/```json\s*/gi, '')
+    .replace(/```\s*/g, '')
     .trim()
 
-  // 2. Find outermost { } or [ ] — whichever comes first
-  const objStart   = text.indexOf('{')
-  const arrStart   = text.indexOf('[')
+  // 2. Find the first opening brace/bracket
+  const objStart = text.indexOf('{')
+  const arrStart = text.indexOf('[')
 
-  let startChar: '{' | '[' | null = null
-  let endChar:   '}' | ']' | null = null
-  let startIdx = -1
+  if (objStart === -1 && arrStart === -1) return text
 
-  if (objStart === -1 && arrStart === -1) {
-    // No JSON structure found at all — return as-is and let parse fail naturally
-    return text
-  } else if (objStart === -1) {
-    startChar = '['; endChar = ']'; startIdx = arrStart
-  } else if (arrStart === -1) {
-    startChar = '{'; endChar = '}'; startIdx = objStart
-  } else {
-    // Take whichever comes first
-    if (objStart < arrStart) {
-      startChar = '{'; endChar = '}'; startIdx = objStart
-    } else {
-      startChar = '['; endChar = ']'; startIdx = arrStart
-    }
-  }
+  let startChar: '{' | '[', endChar: '}' | ']', startIdx: number
+  if      (objStart === -1)              { startChar = '['; endChar = ']'; startIdx = arrStart }
+  else if (arrStart === -1)              { startChar = '{'; endChar = '}'; startIdx = objStart }
+  else if (objStart < arrStart)          { startChar = '{'; endChar = '}'; startIdx = objStart }
+  else                                   { startChar = '['; endChar = ']'; startIdx = arrStart }
 
-  // 3. Walk forward tracking brace depth to find the matching close
-  let depth = 0
-  let endIdx = -1
-  let inString = false
-  let escape   = false
+  // 3. Walk forward counting depth, respecting quoted strings
+  let depth = 0, endIdx = -1, inString = false, escape = false
 
   for (let i = startIdx; i < text.length; i++) {
     const ch = text[i]
-
-    if (escape) { escape = false; continue }
+    if (escape)               { escape = false; continue }
     if (ch === '\\' && inString) { escape = true; continue }
-    if (ch === '"') { inString = !inString; continue }
-    if (inString) continue
+    if (ch === '"')           { inString = !inString; continue }
+    if (inString)             { continue }
+    if (ch === startChar)     { depth++ }
+    else if (ch === endChar)  { depth--; if (depth === 0) { endIdx = i; break } }
+  }
 
-    if (ch === startChar) depth++
-    else if (ch === endChar) {
-      depth--
-      if (depth === 0) { endIdx = i; break }
+  if (endIdx !== -1) {
+    // Complete JSON found — return it directly
+    return text.slice(startIdx, endIdx + 1).trim()
+  }
+
+  // 4. Truncated JSON — attempt repair by closing all open structures
+  let fragment = text.slice(startIdx)
+
+  // Remove any trailing partial string (unclosed quote)
+  const lastQuote  = fragment.lastIndexOf('"')
+  const secondLast = fragment.lastIndexOf('"', lastQuote - 1)
+  if (lastQuote !== -1 && secondLast !== -1) {
+    const between = fragment.slice(secondLast + 1, lastQuote)
+    // If the content between the last two quotes looks like a key, the value is cut off
+    if (!between.includes(':') && fragment.indexOf(':', lastQuote) === -1) {
+      fragment = fragment.slice(0, secondLast + 1)
     }
   }
 
-  if (endIdx === -1) {
-    // Couldn't find balanced close — return from startIdx to end
-    return text.slice(startIdx).trim()
+  // Remove trailing commas before we close
+  fragment = fragment.replace(/,\s*$/, '')
+
+  // Count open braces/brackets and close them
+  let openBraces = 0, openBrackets = 0
+  inString = false; escape = false
+  for (const ch of fragment) {
+    if (escape)               { escape = false; continue }
+    if (ch === '\\' && inString) { escape = true; continue }
+    if (ch === '"')           { inString = !inString; continue }
+    if (inString)             { continue }
+    if      (ch === '{')      { openBraces++ }
+    else if (ch === '}')      { openBraces-- }
+    else if (ch === '[')      { openBrackets++ }
+    else if (ch === ']')      { openBrackets-- }
   }
 
-  return text.slice(startIdx, endIdx + 1).trim()
+  // Close all open arrays first, then objects (LIFO order)
+  let closing = ''
+  for (let i = 0; i < Math.max(0, openBrackets); i++) closing += ']'
+  for (let i = 0; i < Math.max(0, openBraces);   i++) closing += '}'
+
+  return (fragment + closing).trim()
 }
 
-// ── generateText ──────────────────────────────────────────────
+// ── Core text generation with model cascade ───────────────────
 /**
- * Generates a free-text response using Groq.
- * Retries once on network failure (1 s delay).
- * Pass model='fast' to use the high-TPM model for large documents.
+ * Calls Groq with the given prompt and model cascade.
+ * - Decommissioned model or request too large → immediately try next model.
+ * - TPM rate-limit → wait 15 seconds, retry once, then try next model.
+ * - Network errors → retry once after 1 second.
  */
-export async function generateText(prompt: string, model?: string): Promise<string> {
-  const selectedModel = model ?? GROQ_MODEL
+async function callWithCascade(
+  prompt:    string,
+  cascade:   string[],
+  maxTokens: number,
+): Promise<string> {
   let lastErr: unknown
 
-  for (let attempt = 0; attempt < 2; attempt++) {
-    try {
-      const completion = await getClient().chat.completions.create({
-        model:    selectedModel,
-        messages: [{ role: 'user', content: prompt }],
-        temperature: 0.7,
-        max_tokens:  4096,
-      })
-      return completion.choices[0]?.message?.content ?? ''
-    } catch (err) {
-      lastErr = err
-      if (isRateLimit(err)) throw new Error(classifyError(err))
+  for (let mi = 0; mi < cascade.length; mi++) {
+    const model = cascade[mi]
 
-      // If the model is decommissioned or request is too large on first attempt,
-      // retry once with the fast fallback model before giving up
-      if (
-        attempt === 0 &&
-        err instanceof Error &&
-        (err.message.includes('decommissioned') ||
-          err.message.includes('413') ||
-          err.message.includes('too large') ||
-          err.message.includes('Request too large'))
-      ) {
-        await sleep(500)
-        try {
-          const fallback = await getClient().chat.completions.create({
-            model:    GROQ_MODEL_FAST,
-            messages: [{ role: 'user', content: prompt }],
-            temperature: 0.7,
-            max_tokens:  4096,
-          })
-          return fallback.choices[0]?.message?.content ?? ''
-        } catch (fallbackErr) {
-          lastErr = fallbackErr
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const res = await getClient().chat.completions.create({
+          model,
+          messages:    [{ role: 'user', content: prompt }],
+          temperature: 0.3,   // very deterministic for JSON
+          max_tokens:  maxTokens,
+        })
+        return res.choices[0]?.message?.content ?? ''
+      } catch (err) {
+        lastErr = err
+
+        if (shouldSwitchModel(err)) break   // immediately try next model
+
+        if (isTPMRateLimit(err)) {
+          if (attempt === 0) {
+            // Wait 15 s for Groq's per-minute counter to reset, then retry same model
+            await sleep(15_000)
+            continue
+          }
+          break   // still limited → try next model
         }
-      }
 
-      if (attempt === 0) await sleep(1000)
+        // Network / unknown — short wait, retry once
+        if (attempt === 0) { await sleep(1_000); continue }
+        break
+      }
     }
   }
+
   throw new Error(classifyError(lastErr))
 }
 
+// ── generateText ──────────────────────────────────────────────
+export async function generateText(prompt: string): Promise<string> {
+  return callWithCascade(prompt, [MODEL_BEST, MODEL_MEDIUM, MODEL_FAST], 2048)
+}
+
 // ── streamText ────────────────────────────────────────────────
-/**
- * Streams a text response token-by-token via Groq streaming.
- * Calls onChunk with each text fragment. Returns full text.
- */
 export async function streamText(
   prompt: string,
   onChunk: (chunk: string) => void,
 ): Promise<string> {
   if (!apiKey) throw new Error('Groq API key is not configured. Add VITE_GROQ_API_KEY in Vercel → Settings → Environment Variables, then redeploy.')
 
-  try {
-    const stream = await getClient().chat.completions.create({
-      model:    GROQ_MODEL,
-      messages: [{ role: 'user', content: prompt }],
-      temperature: 0.7,
-      max_tokens:  4096,
-      stream: true,
-    })
+  let lastErr: unknown
+  const cascade = [MODEL_BEST, MODEL_MEDIUM, MODEL_FAST]
 
-    let full = ''
-    for await (const chunk of stream) {
-      const text = chunk.choices[0]?.delta?.content ?? ''
-      if (text) {
-        onChunk(text)
-        full += text
+  for (const model of cascade) {
+    try {
+      const stream = await getClient().chat.completions.create({
+        model,
+        messages:    [{ role: 'user', content: prompt }],
+        temperature: 0.7,
+        max_tokens:  2048,
+        stream:      true,
+      })
+      let full = ''
+      for await (const chunk of stream) {
+        const text = chunk.choices[0]?.delta?.content ?? ''
+        if (text) { onChunk(text); full += text }
       }
+      return full
+    } catch (err) {
+      lastErr = err
+      if (shouldSwitchModel(err) || isTPMRateLimit(err)) {
+        await sleep(isTPMRateLimit(err) ? 15_000 : 300)
+        continue
+      }
+      throw new Error(classifyError(err))
     }
-    return full
-  } catch (err) {
-    throw new Error(classifyError(err))
   }
+  throw new Error(classifyError(lastErr))
 }
 
 // ── generateStructuredOutput ──────────────────────────────────
 /**
- * Generates a structured JSON response from Groq.
- * Automatically uses the fast/high-TPM model for large prompts
- * (> 6000 chars) to avoid 413 "Request too large" errors on the
- * free tier of llama-3.3-70b-versatile.
+ * Structured JSON output for document-processing tasks.
+ *
+ * Pipeline:
+ * 1. Caller builds a prompt with Prompts.summarise() etc. — already capped.
+ * 2. This function caps content AGAIN at STRUCTURED_CONTENT_LIMIT (1,600 chars).
+ * 3. Appends a minimal JSON-only instruction.
+ * 4. Calls Groq with max_tokens=700 (sufficient for any summary JSON).
+ * 5. extractJSON() strips markdown, finds the JSON, and repairs truncated output.
+ * 6. Falls back to raw string parse, then throws a clean user-facing error.
  */
 export async function generateStructuredOutput<T>(
   prompt: string,
   schema: z.ZodType<T>,
 ): Promise<T> {
-  const fullPrompt =
-    prompt +
-    '\n\nCRITICAL INSTRUCTION: Your entire response must be ONLY the raw JSON. ' +
-    'Do NOT include any explanation, greeting, markdown code fences, or text outside the JSON. ' +
-    'Start your response with { or [ and end with } or ].'
+  const instruction = '\n\nJSON only. No markdown. No explanation. No extra text. Start your response with { or [.'
 
-  // Use the smaller/faster model for large document prompts
-  const model = fullPrompt.length > 6000 ? GROQ_MODEL_FAST : GROQ_MODEL
-  const raw   = await generateText(fullPrompt, model)
+  // Absolute content cap — safety net for any code path that bypasses prompt helpers.
+  const safePrompt = prompt.length > STRUCTURED_CONTENT_LIMIT
+    ? prompt.slice(0, STRUCTURED_CONTENT_LIMIT) + instruction
+    : prompt + instruction
 
-  // Robust JSON extraction — handles conversational prefixes/suffixes,
-  // fenced blocks, and any stray characters around the JSON structure
+  // Structured tasks: FAST → MEDIUM → BEST
+  // 1200 tokens: enough for a full summary JSON with all fields, even verbose models.
+  const raw = await callWithCascade(
+    safePrompt,
+    [MODEL_FAST, MODEL_MEDIUM, MODEL_BEST],
+    1200,
+  )
+
+  // Try to parse cleaned JSON, then fall back to raw
   const cleaned = extractJSON(raw)
 
   let parsed: unknown
   try {
     parsed = JSON.parse(cleaned)
   } catch {
-    // Last resort: try to parse the original raw text with extractJSON on trimmed raw
-    const fallback = extractJSON(raw.trim())
     try {
-      parsed = JSON.parse(fallback)
+      parsed = JSON.parse(raw.trim())
     } catch {
-      throw new Error(
-        `AI returned invalid JSON. Please try again.\n` +
-        `First 300 chars of response: ${raw.slice(0, 300)}`,
-      )
+      // Never expose raw AI output to the user
+      throw new Error('AI returned an unexpected response. Please try uploading again.')
     }
   }
 
+  // First attempt: strict parse
   const result = schema.safeParse(parsed)
-  if (!result.success) {
-    const issues = result.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; ')
-    throw new Error(`AI response failed validation: ${issues}`)
+  if (result.success) return result.data
+
+  // Second attempt: if parsed is an object, merge with safe defaults and re-parse.
+  // This handles truncated responses where some fields parsed but others are missing.
+  if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) {
+    const coerced: Record<string, unknown> = {
+      summary:        '',
+      key_concepts:   [],
+      definitions:    [],
+      formulas:       [],
+      revision_notes: '',
+      exam_topics:    [],
+      ...(parsed as Record<string, unknown>),
+    }
+    // Sanitise: ensure arrays are actually arrays, strings are strings
+    for (const key of ['key_concepts', 'definitions', 'formulas', 'exam_topics']) {
+      if (!Array.isArray(coerced[key])) coerced[key] = []
+    }
+    for (const key of ['summary', 'revision_notes']) {
+      if (typeof coerced[key] !== 'string') coerced[key] = ''
+    }
+    const coercedResult = schema.safeParse(coerced)
+    if (coercedResult.success) return coercedResult.data
   }
 
-  return result.data
+  // Final attempt: arrays (flashcards, quiz) — if parsed is already an array, accept partial
+  if (Array.isArray(parsed) && parsed.length > 0) {
+    // Filter to only items that pass item-level validation by testing against the schema
+    // with whatever we have; if it still fails, throw.
+    const arrayResult = schema.safeParse(parsed)
+    if (arrayResult.success) return arrayResult.data
+  }
+
+  throw new Error('AI returned an unexpected response. Please try uploading again.')
 }
 
 // ── Multi-turn chat ───────────────────────────────────────────
@@ -284,7 +383,6 @@ export interface ChatTurn {
   parts: Array<{ text: string }>
 }
 
-// Converts our internal ChatTurn format to Groq's message format
 function toGroqMessages(
   systemPrompt: string,
   history: ChatTurn[],
@@ -303,19 +401,15 @@ function toGroqMessages(
   return messages
 }
 
-/**
- * Sends a message in a multi-turn conversation context.
- */
 export async function sendChatMessage(
   systemPrompt: string,
   history: ChatTurn[],
   userMessage: string,
 ): Promise<string> {
   if (!apiKey) throw new Error('Groq API key is not configured. Add VITE_GROQ_API_KEY in Vercel → Settings → Environment Variables, then redeploy.')
-
   try {
     const completion = await getClient().chat.completions.create({
-      model:       GROQ_MODEL,
+      model:       MODEL_BEST,
       messages:    toGroqMessages(systemPrompt, history, userMessage),
       temperature: 0.7,
       max_tokens:  2048,
@@ -326,10 +420,6 @@ export async function sendChatMessage(
   }
 }
 
-/**
- * Streaming variant of sendChatMessage.
- * Calls onChunk with each text fragment. Returns full text.
- */
 export async function streamChatMessage(
   systemPrompt: string,
   history: ChatTurn[],
@@ -338,39 +428,53 @@ export async function streamChatMessage(
 ): Promise<string> {
   if (!apiKey) throw new Error('Groq API key is not configured. Add VITE_GROQ_API_KEY in Vercel → Settings → Environment Variables, then redeploy.')
 
-  try {
-    const stream = await getClient().chat.completions.create({
-      model:       GROQ_MODEL,
-      messages:    toGroqMessages(systemPrompt, history, userMessage),
-      temperature: 0.7,
-      max_tokens:  2048,
-      stream:      true,
-    })
+  let lastErr: unknown
+  const cascade = [MODEL_BEST, MODEL_MEDIUM, MODEL_FAST]
 
-    let full = ''
-    for await (const chunk of stream) {
-      const text = chunk.choices[0]?.delta?.content ?? ''
-      if (text) {
-        onChunk(text)
-        full += text
+  for (const model of cascade) {
+    try {
+      const stream = await getClient().chat.completions.create({
+        model,
+        messages:    toGroqMessages(systemPrompt, history, userMessage),
+        temperature: 0.7,
+        max_tokens:  2048,
+        stream:      true,
+      })
+      let full = ''
+      for await (const chunk of stream) {
+        const text = chunk.choices[0]?.delta?.content ?? ''
+        if (text) { onChunk(text); full += text }
       }
+      return full
+    } catch (err) {
+      lastErr = err
+      if (shouldSwitchModel(err) || isTPMRateLimit(err)) {
+        await sleep(isTPMRateLimit(err) ? 15_000 : 300)
+        continue
+      }
+      throw new Error(classifyError(err))
     }
-    return full
-  } catch (err) {
-    throw new Error(classifyError(err))
   }
+  throw new Error(classifyError(lastErr))
 }
 
-// ── Zod schemas (unchanged — same shapes, just different AI backend) ──
+// ── Zod schemas ───────────────────────────────────────────────
 
 export const SummarySchema = z.object({
-  summary:        z.string().min(1),
-  key_concepts:   z.array(z.string()),
-  definitions:    z.array(z.object({ term: z.string(), definition: z.string() })),
-  formulas:       z.array(z.string()),
-  revision_notes: z.string(),
-  exam_topics:    z.array(z.string()),
-}) satisfies z.ZodType<SummaryResult>
+  // .catch() supplies a fallback only when the field is missing or invalid
+  // at parse time. The output type is always the non-optional base type.
+  summary:        z.string().catch(''),
+  key_concepts:   z.array(z.string()).catch([]),
+  definitions:    z.array(
+    z.object({
+      term:       z.string().catch(''),
+      definition: z.string().catch(''),
+    }),
+  ).catch([]),
+  formulas:       z.array(z.string()).catch([]),
+  revision_notes: z.string().catch(''),
+  exam_topics:    z.array(z.string()).catch([]),
+}) as z.ZodType<SummaryResult>
 
 export const FlashcardItemSchema = z.object({
   question: z.string().min(1),
@@ -378,7 +482,8 @@ export const FlashcardItemSchema = z.object({
   topic:    z.string().default('General'),
 })
 
-export const FlashcardsSchema: z.ZodType<FlashcardItem[]> = z.array(FlashcardItemSchema) as z.ZodType<FlashcardItem[]>
+export const FlashcardsSchema: z.ZodType<FlashcardItem[]> =
+  z.array(FlashcardItemSchema) as z.ZodType<FlashcardItem[]>
 
 export const QuizItemSchema = z.object({
   type:           z.enum(['mcq', 'true_false', 'fill_blank', 'short_answer']),
@@ -388,7 +493,8 @@ export const QuizItemSchema = z.object({
   explanation:    z.string().default(''),
 })
 
-export const QuizSchema: z.ZodType<QuizItem[]> = z.array(QuizItemSchema) as z.ZodType<QuizItem[]>
+export const QuizSchema: z.ZodType<QuizItem[]> =
+  z.array(QuizItemSchema) as z.ZodType<QuizItem[]>
 
 export const StudyPlanSessionSchema = z.object({
   subject:      z.string(),
@@ -402,7 +508,8 @@ export const StudyPlanDaySchema = z.object({
   sessions: z.array(StudyPlanSessionSchema),
 })
 
-export const StudyPlanSchema = z.array(StudyPlanDaySchema) satisfies z.ZodType<StudyPlanDay[]>
+export const StudyPlanSchema =
+  z.array(StudyPlanDaySchema) satisfies z.ZodType<StudyPlanDay[]>
 
 export const PartnerMatchSchema = z.array(
   z.object({
@@ -422,9 +529,10 @@ export const AssignmentBreakdownSchema = z.object({
   timeline:            z.string(),
 }) satisfies z.ZodType<AssignmentBreakdown>
 
-// ── Prompt builders (unchanged) ───────────────────────────────
+// ── Prompt builders ───────────────────────────────────────────
 
 export const Prompts = {
+
   academicAssistant(profile: {
     full_name:       string | null
     degree?:         string | null
@@ -435,79 +543,52 @@ export const Prompts = {
     weak_subjects?:  string[]
   }, noteContext?: { title: string; content: string }): string {
     const courseList = profile.courses.length ? profile.courses.join(', ') : 'not specified'
-    const weakList   = profile.weak_subjects?.length ? profile.weak_subjects.join(', ') : 'none identified'
+    const weakList   = profile.weak_subjects?.length ? profile.weak_subjects.join(', ') : 'none'
 
-    let base = `You are CampusMate AI, an expert academic assistant for university students.
-Student: ${profile.full_name ?? 'Student'}
-University: ${profile.university ?? 'not specified'}
-Degree: ${profile.degree ?? 'not specified'}
-Semester: ${profile.semester ?? 'not specified'}
-Enrolled courses: ${courseList}
-Learning style: ${profile.learning_style ?? 'not specified'}
-Weak subjects: ${weakList}
-
-Answer academic questions clearly and concisely.
-Format responses with markdown where helpful (headings, bullet points, code blocks).
-Keep answers educational and focused. If asked something outside academics, gently redirect.
-Offer follow-up suggestions to deepen understanding when appropriate.`
+    let base =
+      `You are CampusMate AI, an expert academic assistant.\n` +
+      `Student: ${profile.full_name ?? 'Student'} | ` +
+      `Degree: ${profile.degree ?? 'not specified'} | ` +
+      `University: ${profile.university ?? 'not specified'} | ` +
+      `Semester: ${profile.semester ?? '?'}\n` +
+      `Courses: ${courseList}\n` +
+      `Weak subjects: ${weakList}\n\n` +
+      `Answer clearly and concisely. Use markdown for structure. Stay educational.`
 
     if (noteContext) {
-      base += `\n\nThe student is currently studying: "${noteContext.title}"
-Relevant content from their notes:
-${noteContext.content.slice(0, 2000)}
-
-Prioritise answers that relate to this material when relevant.`
+      base +=
+        `\n\nCurrently studying: "${noteContext.title}"\n` +
+        `Notes excerpt:\n${noteContext.content.slice(0, 1_200)}`
     }
     return base
   },
 
   summarise(extractedText: string): string {
-    // Truncate to 6000 chars to stay within Groq free-tier token limits
-    const safeText = extractedText.slice(0, 6000)
-    return `You are an academic study assistant. Analyse the following lecture content and respond with a JSON object matching this exact schema:
-{
-  "summary": "string (structured, 200-400 words)",
-  "key_concepts": ["string"],
-  "definitions": [{ "term": "string", "definition": "string" }],
-  "formulas": ["string"],
-  "revision_notes": "string (bullet points, each on a new line starting with •)",
-  "exam_topics": ["string"]
-}
-
-Lecture content:
-${safeText}`
+    // Cap at STRUCTURED_CONTENT_LIMIT minus ~200 chars for the prompt template.
+    // generateStructuredOutput will cap the full prompt again as a safety net.
+    const text = extractedText.slice(0, STRUCTURED_CONTENT_LIMIT - 200)
+    return (
+      `Summarise this lecture. Output ONLY valid JSON:\n` +
+      `{"summary":"2-3 sentences","key_concepts":["c1"],"definitions":[{"term":"t","definition":"d"}],"formulas":[],"revision_notes":"• point","exam_topics":["t1"]}\n\n` +
+      `Lecture:\n${text}`
+    )
   },
 
   flashcards(text: string, count: number): string {
-    return `Generate exactly ${count} flashcards from the following study material.
-Each flashcard must cover a distinct concept, definition, or fact.
-Respond with a JSON array — no other text:
-[{ "question": "string", "answer": "string", "topic": "string" }]
-
-Material:
-${text.slice(0, 6000)}`
+    return (
+      `Create ${count} flashcards. Output ONLY a JSON array:\n` +
+      `[{"question":"q","answer":"a","topic":"t"}]\n\n` +
+      `Content:\n${text.slice(0, STRUCTURED_CONTENT_LIMIT - 150)}`
+    )
   },
 
   quiz(text: string, count: number, types: string[]): string {
-    return `Generate exactly ${count} quiz questions from the following material.
-Requested question types (use only these): ${types.join(', ')}.
-
-Respond with a JSON array — no other text:
-[{
-  "type": "mcq|true_false|fill_blank|short_answer",
-  "question": "string",
-  "options": ["Option A","Option B","Option C","Option D"] or null,
-  "correct_answer": "string",
-  "explanation": "string (why this answer is correct)"
-}]
-
-For MCQ: provide exactly 4 options.
-For true_false: provide null for options, answer is "True" or "False".
-For fill_blank: use ___ in the question, answer is the missing word/phrase.
-For short_answer: provide null for options.
-
-Material:
-${text.slice(0, 6000)}`
+    return (
+      `Create ${count} quiz questions (types: ${types.join(', ')}). Output ONLY a JSON array:\n` +
+      `[{"type":"mcq","question":"q","options":["A","B","C","D"],"correct_answer":"A","explanation":"e"}]\n` +
+      `MCQ=4 options. true_false: options=null. fill_blank: use ___. short_answer: options=null.\n\n` +
+      `Content:\n${text.slice(0, STRUCTURED_CONTENT_LIMIT - 200)}`
+    )
   },
 
   studyPlan(params: {
@@ -518,71 +599,31 @@ ${text.slice(0, 6000)}`
     startDate:         string
     endDate:           string
   }): string {
-    return `Create a day-by-day study plan from ${params.startDate} to ${params.endDate}.
-
-Student details:
-- Subjects and exam dates: ${params.subjectsWithDates}
-- Weak topics needing extra time: ${params.weakTopics}
-- Daily availability: ${params.availability}
-- Academic goals: ${params.goals}
-
-Rules:
-- Weak topics should get proportionally more sessions
-- Include rest sessions (at least one per week)
-- Practice test sessions should increase closer to exam dates
-- Do not schedule sessions on days with no availability
-
-Respond with a JSON array — no other text:
-[{
-  "date": "YYYY-MM-DD",
-  "sessions": [{
-    "subject": "string",
-    "topic": "string",
-    "duration_min": number,
-    "type": "revision|practice_test|rest"
-  }]
-}]`
+    return (
+      `Create a study plan from ${params.startDate} to ${params.endDate}.\n` +
+      `Subjects: ${params.subjectsWithDates}\n` +
+      `Weak topics: ${params.weakTopics}\n` +
+      `Availability: ${params.availability}\n` +
+      `Goals: ${params.goals}\n\n` +
+      `Output ONLY a JSON array:\n` +
+      `[{"date":"YYYY-MM-DD","sessions":[{"subject":"s","topic":"t","duration_min":60,"type":"revision"}]}]\n` +
+      `Types: revision | practice_test | rest. Include at least one rest per week.`
+    )
   },
 
   partnerMatch(currentProfile: string, candidates: string): string {
-    return `Analyse study partner compatibility between the current student and each candidate.
-
-Current student:
-${currentProfile}
-
-Candidates:
-${candidates}
-
-For each candidate, assess: shared courses, semester proximity, learning style compatibility, schedule overlap, complementary strengths/weaknesses.
-
-Respond with a JSON array sorted by score descending — no other text:
-[{
-  "user_id": "string",
-  "score": number (0-100),
-  "explanation": "string (2-3 sentences explaining the match)",
-  "shared_courses": ["string"],
-  "shared_availability": ["string"]
-}]`
+    return (
+      `Score study partner compatibility. Output ONLY a JSON array sorted by score desc:\n` +
+      `[{"user_id":"id","score":85,"explanation":"2 sentences","shared_courses":["c"],"shared_availability":["Mon evenings"]}]\n\n` +
+      `Current student: ${currentProfile}\n\nCandidates:\n${candidates}`
+    )
   },
 
   assignmentBreakdown(title: string, description: string, deadline: string, course: string): string {
-    return `You are an academic planning assistant. Help a student understand and plan their assignment.
-
-Assignment: ${title}
-Course: ${course}
-Deadline: ${deadline}
-Description:
-${description}
-
-Respond with a JSON object — no other text:
-{
-  "understanding": "string (clear restatement of what the assignment requires)",
-  "subtasks": ["string (specific actionable task)"],
-  "research_directions": ["string (specific research direction or resource type)"],
-  "key_concepts": ["string (concept the student should understand)"],
-  "timeline": "string (suggested day-by-day breakdown leading to deadline)"
-}
-
-Important: Do NOT generate any part of the submission itself. Focus only on planning and understanding.`
+    return (
+      `Help plan this assignment. Output ONLY this JSON:\n` +
+      `{"understanding":"restate requirements","subtasks":["task1"],"research_directions":["dir1"],"key_concepts":["concept1"],"timeline":"day-by-day plan"}\n\n` +
+      `Assignment: ${title}\nCourse: ${course}\nDeadline: ${deadline}\nDescription: ${description.slice(0, 600)}`
+    )
   },
 }

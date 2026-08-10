@@ -1,5 +1,5 @@
 ﻿import { useState, useEffect } from 'react'
-import { Link, useNavigate } from 'react-router-dom'
+import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { z } from 'zod'
@@ -30,8 +30,9 @@ type FormData = z.infer<typeof schema>
 type PageState = 'loading' | 'ready' | 'success' | 'invalid'
 
 export default function ResetPasswordPage() {
-  const { updatePassword } = useAuth()
-  const navigate            = useNavigate()
+  const { updatePassword }  = useAuth()
+  const navigate             = useNavigate()
+  const [searchParams]       = useSearchParams()
   const [pageState, setPageState] = useState<PageState>('loading')
   const [showPassword,  setShowPassword]  = useState(false)
   const [showConfirm,   setShowConfirm]   = useState(false)
@@ -43,25 +44,43 @@ export default function ResetPasswordPage() {
     formState: { errors, isSubmitting },
   } = useForm<FormData>({ resolver: zodResolver(schema) })
 
-  // Supabase sends the recovery token as a URL hash fragment.
-  // The onAuthStateChange event fires with 'PASSWORD_RECOVERY' when valid.
   useEffect(() => {
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((event) => {
-      if (event === 'PASSWORD_RECOVERY') {
-        setPageState('ready')
+    let cancelled = false
+
+    async function bootstrap() {
+      // ── PKCE flow: Supabase appends ?code= to the redirect URL ──
+      const code = searchParams.get('code')
+      if (code) {
+        const { error } = await supabase.auth.exchangeCodeForSession(code)
+        if (!cancelled) {
+          setPageState(error ? 'invalid' : 'ready')
+        }
+        return
       }
-    })
 
-    // If user landed here without a valid token, mark as invalid after a short wait
-    const timer = setTimeout(() => {
-      setPageState((s) => (s === 'loading' ? 'invalid' : s))
-    }, 2500)
+      // ── Implicit / hash flow: listen for PASSWORD_RECOVERY event ──
+      // This fires when Supabase detects a recovery token in the URL hash.
+      const { data: { subscription } } = supabase.auth.onAuthStateChange((event) => {
+        if (event === 'PASSWORD_RECOVERY' && !cancelled) {
+          setPageState('ready')
+        }
+      })
 
-    return () => {
-      subscription.unsubscribe()
-      clearTimeout(timer)
+      // If neither flow resolves within 3 s, the link is invalid/expired.
+      const timer = setTimeout(() => {
+        if (!cancelled) setPageState((s) => (s === 'loading' ? 'invalid' : s))
+      }, 3000)
+
+      return () => {
+        subscription.unsubscribe()
+        clearTimeout(timer)
+      }
     }
-  }, [])
+
+    bootstrap()
+
+    return () => { cancelled = true }
+  }, [searchParams])
 
   // ── Loading ───────────────────────────────────────────────
   if (pageState === 'loading') {
@@ -122,6 +141,8 @@ export default function ResetPasswordPage() {
       setError('root', { message: error.message })
       return
     }
+    // Sign out after password reset so the user must log in fresh with new credentials.
+    await supabase.auth.signOut()
     setPageState('success')
   }
 

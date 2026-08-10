@@ -21,6 +21,7 @@ export const supabase = createClient(supabaseUrl, supabaseAnonKey, {
     persistSession:    true,
     autoRefreshToken:  true,
     detectSessionInUrl: true,
+    flowType: 'pkce',   // Use PKCE flow so password-reset links arrive as ?code= query params
   },
   global: {
     headers: { 'x-app-name': 'campusmate-ai' },
