@@ -3,18 +3,12 @@
  * Extracts plain text from uploaded lecture files.
  * Supported formats: PDF (pdfjs-dist), DOCX (mammoth), PPTX (XML), TXT
  *
- * Token budget per upload (Groq free tier: 6,000 TPM for llama-3.1-8b-instant):
- *   ~400 tokens  =  prompt instructions + JSON template
- *   ~750 tokens  =  extracted text  (3,000 chars ÷ 4 chars/token)
- *   ~800 tokens  =  AI JSON response
- *   ─────────────────────────────────────────────────────────────
- *   ~1,950 tokens total  → safely under 6,000 TPM, even with model overhead
- *
- * MAX_CHARS is set conservatively at 3,000 (down from 3,500) to give extra
- * headroom for Groq's internal token counting which can exceed the 4-char/token
- * approximation for non-ASCII content and slide bullet points.
+ * MAX_CHARS is set to 12,000 chars (~3,000 tokens) to capture meaningful
+ * content from multi-page documents while staying within Groq's context window.
+ * The summarise prompt uses llama-3.3-70b-versatile (32k context) as fallback
+ * so even large extracts are handled safely.
  */
-const MAX_CHARS = 2_000
+const MAX_CHARS = 12_000
 
 // ── PDF ───────────────────────────────────────────────────────
 async function extractFromPDF(file: File): Promise<string> {

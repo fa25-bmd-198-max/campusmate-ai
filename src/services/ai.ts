@@ -37,20 +37,12 @@ const MODEL_MEDIUM = 'gemma2-9b-it'              // 5,000 TPM  — fallback
 const MODEL_BEST   = 'llama-3.3-70b-versatile'  // 12,000 TPM — chat / complex tasks
 
 // ── Hard content limit ────────────────────────────────────────
-// ALL content sent to structured AI calls is capped here.
-// This is the single source of truth — fileParser.ts also caps at its own
-// MAX_CHARS but this second cap ensures nothing slips through regardless
-// of how the prompt is constructed.
-//
-// Raised to 3,000 chars (~750 tokens) since we now allow 1,200 tokens for the
-// response. Total budget stays well under the 6,000 TPM free tier:
-//   ~200 tokens  prompt instructions + JSON template
-//   ~750 tokens  lecture content (3,000 chars ÷ 4)
-//   ~1,200 tokens AI JSON response
-//   ~200 tokens  model overhead
-//   ──────────────────────────────────────────────
-//   ~2,350 tokens total — safely under 6,000 TPM
-const STRUCTURED_CONTENT_LIMIT = 3_000   // chars → ~750 tokens
+// Summarisation uses a higher cap (12,000 chars / ~3,000 tokens) so that
+// multi-page documents are not front-truncated before reaching the model.
+// Other structured tasks (quiz, flashcards) use a lower cap to stay within
+// the fast model's TPM budget.
+const STRUCTURED_CONTENT_LIMIT = 3_000    // chars — quiz / flashcards / planner
+const SUMMARY_CONTENT_LIMIT    = 12_000   // chars — note summarisation only
 
 // ── Client ────────────────────────────────────────────────────
 const apiKey = import.meta.env.VITE_GROQ_API_KEY as string | undefined
@@ -310,9 +302,14 @@ export async function generateStructuredOutput<T>(
 ): Promise<T> {
   const instruction = '\n\nJSON only. No markdown. No explanation. No extra text. Start your response with { or [.'
 
-  // Absolute content cap — safety net for any code path that bypasses prompt helpers.
-  const safePrompt = prompt.length > STRUCTURED_CONTENT_LIMIT
-    ? prompt.slice(0, STRUCTURED_CONTENT_LIMIT) + instruction
+  // Summaries get a much higher content cap so multi-page documents aren't truncated.
+  // Everything else keeps the tighter cap to stay within the fast model's TPM budget.
+  const isSummarisePrompt = prompt.includes('COMPREHENSIVE SUMMARY') || prompt.includes('key_concepts')
+  const contentLimit      = isSummarisePrompt ? SUMMARY_CONTENT_LIMIT : STRUCTURED_CONTENT_LIMIT
+
+  // Absolute content cap — safety net
+  const safePrompt = prompt.length > contentLimit
+    ? prompt.slice(0, contentLimit) + instruction
     : prompt + instruction
 
   // Use more tokens for array outputs (quiz/flashcards need ~80-120 tokens per item,
@@ -320,14 +317,17 @@ export async function generateStructuredOutput<T>(
   const expectsArray = safePrompt.includes('Output ONLY a JSON array') ||
                        safePrompt.includes('Output ONLY valid JSON:\n[')
   const isStudyPlan  = safePrompt.includes('study plan') || safePrompt.includes('Study plan')
-  const maxTokens = isStudyPlan ? 3500 : expectsArray ? 2500 : 1200
+  const isSummary    = safePrompt.includes('COMPREHENSIVE SUMMARY') || safePrompt.includes('key_concepts')
+  const maxTokens    = isStudyPlan ? 3500 : isSummary ? 2500 : expectsArray ? 2500 : 1200
 
-  // Structured tasks: FAST → MEDIUM → BEST
-  const raw = await callWithCascade(
-    safePrompt,
-    [MODEL_FAST, MODEL_MEDIUM, MODEL_BEST],
-    maxTokens,
-  )
+  // Summaries use BEST → MEDIUM → FAST (quality matters most for comprehension).
+  // Everything else uses FAST → MEDIUM → BEST (speed matters for quizzes/flashcards).
+  const cascade = isSummary
+    ? [MODEL_BEST, MODEL_MEDIUM, MODEL_FAST]
+    : [MODEL_FAST, MODEL_MEDIUM, MODEL_BEST]
+
+  // Structured tasks
+  const raw = await callWithCascade(safePrompt, cascade, maxTokens)
 
   // Try to parse cleaned JSON, then fall back to raw
   const cleaned = extractJSON(raw)
@@ -591,13 +591,27 @@ export const Prompts = {
   },
 
   summarise(extractedText: string): string {
-    // Cap at STRUCTURED_CONTENT_LIMIT minus ~200 chars for the prompt template.
-    // generateStructuredOutput will cap the full prompt again as a safety net.
-    const text = extractedText.slice(0, STRUCTURED_CONTENT_LIMIT - 200)
+    // Use the full SUMMARY_CONTENT_LIMIT — no extra slice needed here since
+    // generateStructuredOutput applies the cap as a safety net anyway.
+    const text = extractedText.slice(0, SUMMARY_CONTENT_LIMIT)
     return (
-      `Summarise this lecture. Output ONLY valid JSON:\n` +
-      `{"summary":"2-3 sentences","key_concepts":["c1"],"definitions":[{"term":"t","definition":"d"}],"formulas":[],"revision_notes":"• point","exam_topics":["t1"]}\n\n` +
-      `Lecture:\n${text}`
+      `You are an expert academic study assistant. Analyse the following document and produce a COMPREHENSIVE SUMMARY that covers every major topic, argument, and detail — do not omit important information for the sake of brevity.\n\n` +
+      `Output ONLY valid JSON with this exact structure (no markdown, no extra text):\n` +
+      `{\n` +
+      `  "summary": "A thorough paragraph (6-10 sentences) covering all main points, arguments, and conclusions from the document. Do not write only 2-3 sentences — be comprehensive.",\n` +
+      `  "key_concepts": ["Every important concept, term, or idea from the document — aim for 8-15 items"],\n` +
+      `  "definitions": [{"term": "technical term", "definition": "clear, complete definition"}, ...],\n` +
+      `  "formulas": ["Any equations, formulas, or numerical relationships — include units and context"],\n` +
+      `  "revision_notes": "Detailed bullet-point revision notes covering ALL major sections of the document. Use • for each point. Include sub-points where needed. Cover the full document, not just the introduction.",\n` +
+      `  "exam_topics": ["Every topic a student should prepare for an exam based on this document — be thorough"]\n` +
+      `}\n\n` +
+      `IMPORTANT RULES:\n` +
+      `- Cover content from the ENTIRE document, not just the beginning\n` +
+      `- The summary field must be at least 6 sentences long\n` +
+      `- revision_notes must cover all major sections with bullet points\n` +
+      `- key_concepts should include ALL important terms from the document\n` +
+      `- Do NOT truncate or abbreviate any field\n\n` +
+      `DOCUMENT:\n${text}`
     )
   },
 
