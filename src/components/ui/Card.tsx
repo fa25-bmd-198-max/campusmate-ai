@@ -26,13 +26,18 @@ function Card({ padding = 'md', borderless = false, muted = false, className, ch
       className={cn(
         'rounded-xl transition-shadow',
         muted
-          ? 'bg-gray-50 dark:bg-gray-800/50'
+          ? 'dark:bg-gray-800/50'
           : 'bg-white dark:bg-gray-900',
-        !borderless && 'border border-gray-200 dark:border-gray-800',
+        !borderless && 'dark:border-gray-800',
         'shadow-card',
         paddingMap[padding],
         className,
       )}
+      style={
+        muted
+          ? (!borderless ? { border: '1px solid #D8D2F0', backgroundColor: '#F5F3FC' } : { backgroundColor: '#F5F3FC' })
+          : (!borderless ? { border: '1px solid #D8D2F0' } : undefined)
+      }
       {...props}
     >
       {children}

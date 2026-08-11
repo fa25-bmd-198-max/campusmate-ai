@@ -14,8 +14,8 @@
    * Dark mode  : deep teal (#0A1F22) bg, frost lavender (#F3F0FB) text
    */
   body {
-    background-color: #f3f0fb;          /* frost lavender — light bg */
-    color: #0a1f22;                     /* deep teal — text on light */
+    background-color: #edeaf9;          /* frost lavender tint — main page bg */
+    color: #3a3560;                     /* dark indigo — readable on lavender bg */
     font-family: 'Inter', ui-sans-serif, system-ui, sans-serif;
   }
 
@@ -26,13 +26,15 @@
 
   /* Tailwind dark-mode utility override */
   :root {
-    --color-bg-light:   #f3f0fb;
+    --color-bg-light:   #edeaf9;
     --color-bg-dark:    #0a1f22;
     --color-surface:    #123b3e;
     --color-mid:        #276b6e;
     --color-accent:     #c6b8f0;
+    --color-card-bg:    #ffffff;
+    --color-card-border:#d8d2f0;
     --color-text-light: #f3f0fb;
-    --color-text-dark:  #0a1f22;
+    --color-text-dark:  #3a3560;
   }
 
   * {
