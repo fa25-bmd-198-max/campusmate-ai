@@ -1,7 +1,6 @@
 import type { Config } from 'tailwindcss'
 
 const config: Config = {
-  // Enable dark mode via the 'dark' class on <html>
   darkMode: 'class',
   content: [
     './index.html',
@@ -10,41 +9,58 @@ const config: Config = {
   theme: {
     extend: {
       colors: {
-        // ── Deep Teal + Frost Lavender palette ──────────────────
-        // primary scale maps to the lavender accent (#C6B8F0 at 400/500)
-        // dark tones anchor to the deep teal base (#0A1F22)
+        // ── Charcoal + Burgundy + Forest palette ─────────────────
+        // #36454F — charcoal blue-grey  → surfaces, sidebar, navbar
+        // #3C0000 — deep burgundy       → primary accent, CTAs, active states
+        // #1C3A2A — forest green        → secondary accent, success tones
+        // #F5F0EB — warm off-white      → light page background
+        // #EDE8E0 — warm card surface   → card bg on light mode
         primary: {
-          50:  '#f3f0fb',   // frost lavender — light bg / text-on-dark   (#F3F0FB)
-          100: '#e8e2f7',
-          200: '#d9cfff',
-          300: '#c6b8f0',   // lavender accent                             (#C6B8F0)
-          400: '#b8a6e8',
-          500: '#c6b8f0',   // primary accent — buttons, links, highlights (#C6B8F0)
-          600: '#276b6e',   // mid teal — secondary buttons, borders, icons (#276B6E)
-          700: '#1a5255',
-          800: '#123b3e',   // secondary dark surface — cards, sections    (#123B3E)
-          900: '#0a1f22',   // deep teal base — navbar, hero, footer       (#0A1F22)
-          950: '#061518',
+          50:  '#fdf5f5',
+          100: '#f9e4e4',
+          200: '#f0bcbc',
+          300: '#e48888',
+          400: '#cc4444',
+          500: '#3c0000',   // deep burgundy — primary accent          (#3C0000)
+          600: '#3c0000',   // same — used for buttons/links
+          700: '#2d0000',
+          800: '#1e0000',
+          900: '#0f0000',
+          950: '#070000',
         },
-        // secondary scale — teal surface tones for backgrounds & cards
-        secondary: {
-          50:  '#f3f0fb',   // frost lavender
-          100: '#e0f4f4',
-          200: '#b8e4e5',
-          300: '#7ecdd0',
-          400: '#45b3b8',
-          500: '#276b6e',   // mid teal accent                             (#276B6E)
-          600: '#1d5255',
-          700: '#143b3e',
-          800: '#123b3e',   // dark surface                                (#123B3E)
-          900: '#0a1f22',   // deep teal base                              (#0A1F22)
-          950: '#061518',
+        // Surface / layout scale — charcoal blue-grey
+        surface: {
+          50:  '#f5f6f7',
+          100: '#e8eaec',
+          200: '#cdd2d6',
+          300: '#a8b0b7',
+          400: '#7d8c96',
+          500: '#36454f',   // charcoal blue-grey — sidebar/navbar     (#36454F)
+          600: '#2d3a43',
+          700: '#232e36',
+          800: '#1a2229',
+          900: '#10161b',
+          950: '#080c0f',
         },
-        // Semantic tokens — kept readable against both bg tones
-        success:  '#10b981', // emerald-500
-        warning:  '#f59e0b', // amber-500
-        error:    '#ef4444', // red-500
-        info:     '#7ecdd0', // teal-ish info tone
+        // Forest green — secondary accent
+        forest: {
+          50:  '#f0f7f3',
+          100: '#d9ede2',
+          200: '#a8d4bb',
+          300: '#6db593',
+          400: '#3a8f67',
+          500: '#1c3a2a',   // forest green — secondary accent          (#1C3A2A)
+          600: '#163020',
+          700: '#102417',
+          800: '#0a180f',
+          900: '#050c07',
+          950: '#020504',
+        },
+        // Semantic tokens
+        success:  '#1c3a2a',
+        warning:  '#b45309',
+        error:    '#991b1b',
+        info:     '#36454f',
       },
       fontFamily: {
         sans: ['Inter', 'ui-sans-serif', 'system-ui', 'sans-serif'],
@@ -64,8 +80,8 @@ const config: Config = {
         '2xl':   '1.25rem',
       },
       boxShadow: {
-        card:  '0 1px 3px 0 rgb(0 0 0 / 0.1), 0 1px 2px -1px rgb(0 0 0 / 0.1)',
-        modal: '0 20px 25px -5px rgb(0 0 0 / 0.1), 0 8px 10px -6px rgb(0 0 0 / 0.1)',
+        card:  '0 1px 4px 0 rgb(54 69 79 / 0.10), 0 1px 2px -1px rgb(54 69 79 / 0.08)',
+        modal: '0 20px 40px -8px rgb(54 69 79 / 0.25), 0 8px 16px -4px rgb(54 69 79 / 0.12)',
       },
       animation: {
         'fade-in':        'fadeIn 0.2s ease-in-out',

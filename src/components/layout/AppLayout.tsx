@@ -14,28 +14,21 @@ export default function AppLayout() {
   const [chatDrawerOpen, setChatDrawerOpen] = useState(false)
 
   return (
-    <div className="flex h-screen overflow-hidden" style={{ backgroundColor: '#EDEAF9' }}>
+    <div className="flex h-screen overflow-hidden" style={{ backgroundColor: '#F5F0EB' }}>
 
-      {/* ── Desktop sidebar ────────────────────────────────────── */}
       <DesktopSidebar />
 
-      {/* ── Mobile nav drawer ──────────────────────────────────── */}
       <MobileDrawer
         open={navDrawerOpen}
         onClose={() => setNavDrawerOpen(false)}
       />
 
-      {/* ── Main content column ────────────────────────────────── */}
       <div className="flex min-w-0 flex-1 flex-col">
-
         <Topbar onMenuClick={() => setNavDrawerOpen(true)} />
 
         <main
           id="main-content"
-          className={cn(
-            'flex-1 overflow-y-auto',
-            'pb-16 lg:pb-0',
-          )}
+          className={cn('flex-1 overflow-y-auto', 'pb-16 lg:pb-0')}
           tabIndex={-1}
           aria-label="Main content"
         >
@@ -49,13 +42,12 @@ export default function AppLayout() {
         <MobileNav />
       </div>
 
-      {/* ── AI chat drawer (persists across routes) ─────────────── */}
       <ChatDrawer
         open={chatDrawerOpen}
         onClose={() => setChatDrawerOpen(false)}
       />
 
-      {/* ── Floating AI assistant button ───────────────────────── */}
+      {/* Floating AI assistant button */}
       <button
         onClick={() => setChatDrawerOpen((v) => !v)}
         aria-label={chatDrawerOpen ? 'Close AI assistant' : 'Open AI assistant'}
@@ -64,12 +56,13 @@ export default function AppLayout() {
           'fixed bottom-20 right-5 z-40 lg:bottom-6',
           'flex h-14 w-14 items-center justify-center rounded-full',
           'shadow-lg transition-all duration-200',
-          'focus:outline-none focus-visible:ring-4 focus-visible:ring-primary-400 focus-visible:ring-offset-2 dark:focus-visible:ring-offset-gray-950',
+          'focus:outline-none focus-visible:ring-4 focus-visible:ring-offset-2',
           'hover:scale-105 active:scale-95',
           chatDrawerOpen
-            ? 'bg-gray-700 text-white hover:bg-gray-800'
-            : 'bg-primary-600 text-white hover:bg-primary-700 active:bg-primary-800',
+            ? 'bg-surface-700 text-white hover:bg-surface-800'
+            : 'text-white hover:opacity-90',
         )}
+        style={chatDrawerOpen ? undefined : { backgroundColor: '#3c0000' }}
       >
         <Bot className="h-6 w-6" aria-hidden="true" />
       </button>

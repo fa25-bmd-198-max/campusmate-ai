@@ -9,58 +9,41 @@
   }
 
   /*
-   * Deep Teal + Frost Lavender theme
-   * Light mode : frost lavender (#F3F0FB) bg, deep teal (#0A1F22) text
-   * Dark mode  : deep teal (#0A1F22) bg, frost lavender (#F3F0FB) text
+   * Charcoal + Burgundy + Forest palette
+   * Light mode : warm off-white (#F5F0EB) bg, charcoal (#36454F) text
+   * Dark mode  : deep charcoal (#10161B) bg, warm off-white text
    */
   body {
-    background-color: #edeaf9;          /* frost lavender tint — main page bg */
-    color: #3a3560;                     /* dark indigo — readable on lavender bg */
+    background-color: #f5f0eb;
+    color: #36454f;
     font-family: 'Inter', ui-sans-serif, system-ui, sans-serif;
   }
 
-  .dark body {
-    background-color: #0a1f22;          /* deep teal base — dark bg */
-    color: #f3f0fb;                     /* frost lavender — text on dark */
-  }
-
-  /* Tailwind dark-mode utility override */
   :root {
-    --color-bg-light:   #edeaf9;
-    --color-bg-dark:    #0a1f22;
-    --color-surface:    #123b3e;
-    --color-mid:        #276b6e;
-    --color-accent:     #c6b8f0;
-    --color-card-bg:    #ffffff;
-    --color-card-border:#d8d2f0;
-    --color-text-light: #f3f0fb;
-    --color-text-dark:  #3a3560;
+    --color-bg:           #f5f0eb;
+    --color-bg-dark:      #10161b;
+    --color-surface:      #36454f;
+    --color-accent:       #3c0000;
+    --color-forest:       #1c3a2a;
+    --color-card-bg:      #ffffff;
+    --color-card-border:  #ddd6cc;
+    --color-text:         #36454f;
+    --color-text-muted:   #6b7c87;
   }
 
-  * {
-    scroll-behavior: smooth;
-  }
+  * { scroll-behavior: smooth; }
 
-  /* Custom scrollbar */
-  ::-webkit-scrollbar {
-    width: 6px;
-    height: 6px;
-  }
-  ::-webkit-scrollbar-track {
-    background: transparent;
-  }
+  ::-webkit-scrollbar { width: 6px; height: 6px; }
+  ::-webkit-scrollbar-track { background: transparent; }
   ::-webkit-scrollbar-thumb {
-    background-color: #276b6e;
+    background-color: #36454f;
     border-radius: 9999px;
   }
-  ::-webkit-scrollbar-thumb:hover {
-    background-color: #c6b8f0;
-  }
+  ::-webkit-scrollbar-thumb:hover { background-color: #3c0000; }
 }
 
 @layer components {
-  /* Consistent focus ring across all interactive elements */
   .focus-ring {
-    @apply focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-300 focus-visible:ring-offset-2 dark:focus-visible:ring-offset-primary-900;
+    @apply focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500 focus-visible:ring-offset-2;
   }
 }
