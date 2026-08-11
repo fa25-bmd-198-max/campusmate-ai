@@ -10,39 +10,41 @@ const config: Config = {
   theme: {
     extend: {
       colors: {
-        // Primary – indigo scale
+        // ── Deep Teal + Frost Lavender palette ──────────────────
+        // primary scale maps to the lavender accent (#C6B8F0 at 400/500)
+        // dark tones anchor to the deep teal base (#0A1F22)
         primary: {
-          50:  '#eef2ff',
-          100: '#e0e7ff',
-          200: '#c7d2fe',
-          300: '#a5b4fc',
-          400: '#818cf8',
-          500: '#6366f1',
-          600: '#4f46e5',
-          700: '#4338ca',
-          800: '#3730a3',
-          900: '#312e81',
-          950: '#1e1b4b',
+          50:  '#f3f0fb',   // frost lavender — light bg / text-on-dark   (#F3F0FB)
+          100: '#e8e2f7',
+          200: '#d9cfff',
+          300: '#c6b8f0',   // lavender accent                             (#C6B8F0)
+          400: '#b8a6e8',
+          500: '#c6b8f0',   // primary accent — buttons, links, highlights (#C6B8F0)
+          600: '#276b6e',   // mid teal — secondary buttons, borders, icons (#276B6E)
+          700: '#1a5255',
+          800: '#123b3e',   // secondary dark surface — cards, sections    (#123B3E)
+          900: '#0a1f22',   // deep teal base — navbar, hero, footer       (#0A1F22)
+          950: '#061518',
         },
-        // Secondary – violet scale
+        // secondary scale — teal surface tones for backgrounds & cards
         secondary: {
-          50:  '#f5f3ff',
-          100: '#ede9fe',
-          200: '#ddd6fe',
-          300: '#c4b5fd',
-          400: '#a78bfa',
-          500: '#8b5cf6',
-          600: '#7c3aed',
-          700: '#6d28d9',
-          800: '#5b21b6',
-          900: '#4c1d95',
-          950: '#2e1065',
+          50:  '#f3f0fb',   // frost lavender
+          100: '#e0f4f4',
+          200: '#b8e4e5',
+          300: '#7ecdd0',
+          400: '#45b3b8',
+          500: '#276b6e',   // mid teal accent                             (#276B6E)
+          600: '#1d5255',
+          700: '#143b3e',
+          800: '#123b3e',   // dark surface                                (#123B3E)
+          900: '#0a1f22',   // deep teal base                              (#0A1F22)
+          950: '#061518',
         },
-        // Semantic tokens
+        // Semantic tokens — kept readable against both bg tones
         success:  '#10b981', // emerald-500
         warning:  '#f59e0b', // amber-500
         error:    '#ef4444', // red-500
-        info:     '#3b82f6', // blue-500
+        info:     '#7ecdd0', // teal-ish info tone
       },
       fontFamily: {
         sans: ['Inter', 'ui-sans-serif', 'system-ui', 'sans-serif'],
@@ -66,10 +68,10 @@ const config: Config = {
         modal: '0 20px 25px -5px rgb(0 0 0 / 0.1), 0 8px 10px -6px rgb(0 0 0 / 0.1)',
       },
       animation: {
-        'fade-in':    'fadeIn 0.2s ease-in-out',
-        'slide-up':   'slideUp 0.3s ease-out',
+        'fade-in':        'fadeIn 0.2s ease-in-out',
+        'slide-up':       'slideUp 0.3s ease-out',
         'slide-in-right': 'slideInRight 0.3s ease-out',
-        'pulse-slow': 'pulse 3s cubic-bezier(0.4, 0, 0.6, 1) infinite',
+        'pulse-slow':     'pulse 3s cubic-bezier(0.4, 0, 0.6, 1) infinite',
       },
       keyframes: {
         fadeIn: {
